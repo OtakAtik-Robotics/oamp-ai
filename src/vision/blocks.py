@@ -1,3 +1,5 @@
+import threading
+
 class YOLODetectionThread(threading.Thread):
     """Background thread for YOLO inference to prevent GUI blocking"""
     def __init__(self, model, use_bantal_model):

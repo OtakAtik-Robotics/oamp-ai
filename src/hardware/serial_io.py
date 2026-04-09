@@ -1,3 +1,9 @@
+import threading
+from queue import Queue
+import serial
+import serial.tools.list_ports
+import os
+
 class SerialReaderThread(threading.Thread):
     """Background thread for reading serial data from ESP32"""
     def __init__(self, port=None, baudrate=115200):
