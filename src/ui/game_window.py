@@ -13,6 +13,7 @@ from src.utils.audio import play_audio, play_feedback_audio
 from src.utils.math_eval import estimate_cognitive_age
 from src.ui.components import TextFrame, ImageFrame
 from src.vision.blocks import YOLODetectionThread
+from src.vision.hands import HandTracker
 from src.hardware.serial_io import SerialReaderThread
 
 class TimeIn(customtkinter.CTk):
@@ -133,8 +134,47 @@ class TimeIn(customtkinter.CTk):
         self.bind('<Return>', self.skip_current_level)
 
     def setup_ai_models(self):
-        pass 
-        # TODO: Move YOLO initialization here from vision.blocks
+        self.cap = cv2.VideoCapture(1)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        self.hand_tracker = HandTracker()
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        use_bantal = os.getenv('MODEL_BANTAL', 'false').lower() == 'true'
+        model_yolo = None
+        
+        if use_bantal:
+            path_model = os.path.join(self.base_dir, 'models', 'weights', 'bantal.pt')
+            try:
+                from ultralytics import YOLO
+                model_yolo = YOLO(path_model)
+                model_yolo.to(device)
+            except Exception:
+                use_bantal = False
+                
+        if not use_bantal:
+            path_model = os.path.join(self.base_dir, 'models', 'weights', 'best.pt')
+            try:
+                model_yolo = torch.hub.load(
+                    os.path.join(self.base_dir, 'models', 'yolov5'),
+                    'custom',
+                    path=path_model,
+                    force_reload=True,
+                    source='local'
+                )
+                model_yolo.to(device)
+            except Exception:
+                pass
+
+        if model_yolo is not None:
+            self.yolo_thread = YOLODetectionThread(model_yolo, use_bantal)
+            self.yolo_thread.start()
+        else:
+            self.yolo_thread = None
+            
+        self.yolo_skip_frames = int(os.getenv('YOLO_SKIP_FRAMES', '2'))
+        self.mediapipe_skip_frames = int(os.getenv('MEDIAPIPE_SKIP_FRAMES', '2'))
 
     def preload_level_images(self):
         for level in range(1, 9):
@@ -272,15 +312,126 @@ class TimeIn(customtkinter.CTk):
     def streaming(self):
         self.button_0.configure(state="disabled")
         
-        # TODO: Frame fetching and YOLO evaluation loop goes here
-        # When YOLO confirms arrangement matches self.level_answers[self.current_variant]:
-        #     self.process_level_completion(time.time())
-        
+        if hasattr(self, 'cap') and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            
+            if ret and not self.hide_camera and self.camera is not None:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                if self.frame_count % (self.mediapipe_skip_frames + 1) == 0:
+                    frame_rgb, landmarks = self.hand_tracker.process_and_draw(frame_rgb)
+                
+                imgBlur = cv2.GaussianBlur(frame_rgb, (7,7), 1)
+                imgGray = cv2.cvtColor(imgBlur, cv2.COLOR_RGB2GRAY)
+                _, imgThres = cv2.threshold(imgGray, 175, 255, cv2.THRESH_BINARY)
+
+                if self.yolo_thread is not None:
+                    if self.frame_count % (self.yolo_skip_frames + 1) == 0:
+                        if self.yolo_thread.frame_queue.empty():
+                            try:
+                                self.yolo_thread.frame_queue.put_nowait(np.array(frame, copy=True))
+                            except:
+                                pass
+                                
+                    if not self.yolo_thread.result_queue.empty():
+                        try:
+                            self.latest_detections = self.yolo_thread.result_queue.get_nowait()
+                        except:
+                            pass
+
+                    box_design = []
+                    box_distance = []
+                    pos_x = []
+                    pos_y = []
+
+                    for x1, y1, x2, y2, conf_pred, cls_id, cls in self.latest_detections:
+                        if conf_pred > 0.7:
+                            center_x = int((x1+x2)/2)
+                            center_y = int((y1+y2)/2)
+                            x1, x2, y1, y2 = int(x1), int(x2), int(y1), int(y2)
+                            
+                            box_distance.append(int(math.sqrt(pow(center_x, 2) + pow(center_y, 2))))
+                            pos_x.append(center_x)
+                            pos_y.append(center_y)
+                            
+                            if y1 >= 0 and y2 <= imgThres.shape[0] and x1 >= 0 and x2 <= imgThres.shape[1] and (y2-y1) > 0 and (x2-x1) > 0:
+                                dim = (100, 100)
+                                imgBox = cv2.resize(imgThres[y1:y2, x1:x2], dim, interpolation=cv2.INTER_AREA)
+                                box_class = [imgBox[50,25], imgBox[75,50], imgBox[50,75], imgBox[25,50]]
+                                
+                                box_face = 0
+                                if box_class == [0,0,0,0]: box_face = 1
+                                elif box_class == [255,255,255,255]: box_face = 2
+                                elif box_class == [255,255,0,0]: box_face = 3
+                                elif box_class == [255,0,0,255]: box_face = 4
+                                elif box_class == [0,0,255,255]: box_face = 5
+                                elif box_class == [0,255,255,0]: box_face = 6
+                                
+                                if box_face > 0:
+                                    box_design.append(box_face)
+                                    cv2.rectangle(frame_rgb, (x1,y1), (x2, y2), (0, 255, 0), 2)
+
+                    if len(box_design) == 4 and len(box_distance) == 4:
+                        pts = np.array([[pos_x[i], pos_y[i]] for i in range(4)], np.int32)
+                        for i in range(4):
+                            for j in range(i+1, 4):
+                                cv2.line(frame_rgb, tuple(pts[i]), tuple(pts[j]), (0, 0, 0), 2)
+                                
+                        len_rect = sorted([
+                            int(math.sqrt((pos_x[0]-pos_x[1])**2 + (pos_y[0]-pos_y[1])**2)),
+                            int(math.sqrt((pos_x[1]-pos_x[2])**2 + (pos_y[1]-pos_y[2])**2)),
+                            int(math.sqrt((pos_x[2]-pos_x[3])**2 + (pos_y[2]-pos_y[3])**2)),
+                            int(math.sqrt((pos_x[3]-pos_x[0])**2 + (pos_y[3]-pos_y[0])**2)),
+                            int(math.sqrt((pos_x[0]-pos_x[2])**2 + (pos_y[0]-pos_y[2])**2)),
+                            int(math.sqrt((pos_x[1]-pos_x[3])**2 + (pos_y[1]-pos_y[3])**2))
+                        ])
+                        
+                        if all(abs(len_rect[0] - len_rect[i]) < 100 for i in range(1, 4)) and \
+                           all(abs(len_rect[1] - len_rect[i]) < 100 for i in range(2, 4)) and \
+                           abs(len_rect[2] - len_rect[3]) < 100:
+                           
+                            indexed_positions = [(pos_x[i], pos_y[i], i) for i in range(4)]
+                            sorted_by_x = sorted(pos_x)
+                            mid_point = (sorted_by_x[1] + sorted_by_x[2]) / 2 
+                            indexed_positions.sort(key=lambda p: (p[0] >= mid_point, p[1]))
+                            sort_index = [idx for (x, y, idx) in indexed_positions]
+                            box_design_sort = [box_design[i] for i in sort_index]
+                            
+                            current_answer = self.level_answers.get(self.current_variant, [])
+                            if box_design_sort == current_answer:
+                                self.process_level_completion(time.time())
+
+                img = Image.fromarray(frame_rgb)
+                container_width = self.video_frame_1.winfo_width()
+                container_height = self.video_frame_1.winfo_height()
+                
+                if container_width > 10 and container_height > 10:
+                    frame_height, frame_width = frame.shape[:2]
+                    width_ratio = container_width / frame_width
+                    height_ratio = container_height / frame_height
+                    scale = min(width_ratio, height_ratio)
+                    
+                    if scale < 1:
+                        new_width = int(frame_width * scale)
+                        new_height = int(frame_height * scale)
+                        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                
+                ImgTks = ImageTk.PhotoImage(image=img)
+                self.camera.imgtk = ImgTks
+                self.camera.configure(image=ImgTks)
+
+        self.frame_count += 1
         self.after(10, self.streaming)
 
     def cleanup(self):
         if self.serial_thread:
             self.serial_thread.stop()
+        if hasattr(self, 'hand_tracker'):
+            self.hand_tracker.close()
+        if hasattr(self, 'cap') and self.cap.isOpened():
+            self.cap.release()
+        if hasattr(self, 'yolo_thread') and self.yolo_thread:
+            self.yolo_thread.stop()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
