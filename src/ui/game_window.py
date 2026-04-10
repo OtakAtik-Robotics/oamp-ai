@@ -1,439 +1,475 @@
 import os
 import time
-import math
 import random
 import numpy as np
 import cv2
 import torch
 import customtkinter
 from PIL import Image, ImageTk
+from typing import Optional
 
-from src.api_client import send_game_session
+from src.api_client import ServerClient, SessionResult
 from src.utils.audio import play_audio, play_feedback_audio
 from src.utils.math_eval import estimate_cognitive_age
-from src.ui.components import TextFrame, ImageFrame
+from src.ui.components import (
+    TextFrame, ImageFrame,
+    TimerDisplay, LevelBadge, StatusBar, DualCameraPanel,
+)
 from src.vision.blocks import YOLODetectionThread
 from src.vision.hands import HandTracker
-from src.hardware.serial_io import SerialReaderThread
+from src.vision.face import FaceEmotionThread, FaceMeshDrawer
+from src.vision.evaluator import BlockEvaluator
+from src.voice.recog import VoiceCommandThread, VoiceGreeter, VoiceStatus
 
-class TimeIn(customtkinter.CTk):
-    def __init__(self, user_data, hardware_conn=None):
+
+RED     = "#D32F2F"
+BG_DARK = "#0f0f0f"
+BG_CARD = "#1a1a1a"
+WHITE   = "#f1f5f9"
+MUTED   = "#64748b"
+
+
+class GameWindow(customtkinter.CTk):
+
+    def __init__(
+        self,
+        user_data: dict,
+        server_client: Optional[ServerClient] = None,
+        hardware_conn=None,
+    ):
         super().__init__()
-        
-        self.nick_name = user_data.get("name", "")
-        self.age_range_code = user_data.get("age", 0)
-        self.gender_code = user_data.get("gender", "")
+        self.user_data     = user_data
+        self.server_client = server_client
         self.serial_thread = hardware_conn
+        self.session_id: Optional[str] = None
 
-        self.setup_environment()
-        self.setup_ui()
-        self.setup_game_variables()
-        self.setup_ai_models()
-        self.preload_level_images()
+        self._setup_env()
+        self._setup_window()
+        self._setup_layout()
+        self._setup_game_state()
+        self._setup_ai()
+        self._preload_images()
 
-    def setup_environment(self):
-        self.display_half = os.getenv('DISPLAY_HALF', 'true').lower() == 'true'
-        self.hide_camera = os.getenv('HIDE_CAMERA', 'false').lower() == 'true'
-        self.button_mode = os.getenv('BUTTON_MODE', 'false').lower() == 'true'
-        self.debug_mode = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
-        self.max_level = int(os.getenv('MAX_LEVEL', '8'))
-        self.base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        # Sapa anak setelah UI siap
+        self.after(800, self._greet_player)
 
-    def setup_game_variables(self):
-        self.timer_task_all = []
-        self.cognitive_age_list = []
-        self.task_flags = {i: True for i in range(1, self.max_level + 1)}
-        self.current_question = 1
-        self.timer_running = False
-        self.start_time = 0
-        self.start_task = 0
-        self.frame_count = 0
-        self.fps_counter = 0
-        self.fps_start_time = time.time()
-        self.current_fps = 0
-        self.image_visible = False
-        self.image_show_time = None
-        self.image_display_duration = 5.0
-        self.latest_detections = []
-        self.cached_level_images = {}
-        
-        self.level_answers = {
-            '1a': [2,1,1,1], '1b': [2,1,1,2], '1c': [1,1,1,2], '1d': [1,2,2,1],
-            '2a': [2,1,6,1], '2b': [3,2,1,2], '2c': [2,2,5,6], '2d': [6,2,2,6],
-            '3a': [3,5,1,1], '3b': [1,5,1,6], '3c': [2,3,4,1], '3d': [6,5,3,4],
-            '4a': [6,2,1,6], '4b': [3,2,2,5], '4c': [1,5,3,1], '4d': [4,2,2,6],
-            '5a': [6,3,5,4], '5b': [5,4,6,3], '5c': [3,5,6,4], '5d': [4,4,6,6],
-            '6a': [1,4,3,1], '6b': [6,1,5,5], '6c': [5,1,1,4], '6d': [5,4,4,5],
-            '7a': [4,5,5,5], '7b': [4,5,5,6], '7c': [2,5,1,5], '7d': [1,2,3,6],
-            '8a': [6,5,6,3], '8b': [6,3,4,2], '8c': [5,6,3,5], '8d': [3,6,5,4],
-        }
-
-    def setup_ui(self):
-        self.title("Block Design Test")
-        self.geometry("960x560" if self.display_half else "1200x800")
-        
-        self.grid_rowconfigure(0, weight=4 if self.display_half else 1)
-        if self.display_half:
-            self.grid_rowconfigure(1, weight=1)
-            
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=1)
-
-        self.top_container = customtkinter.CTkFrame(self)
-        self.top_container.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 150) if self.display_half else 10)
-        self.top_container.grid_columnconfigure(0, weight=1)
-        self.top_container.grid_columnconfigure(1, weight=1)
-        self.top_container.grid_rowconfigure(0, weight=1)
-
-        self.content_container = customtkinter.CTkFrame(self.top_container)
-        self.content_container.grid(row=0, column=0, columnspan=2, sticky="nsew")
-        self.content_container.grid_columnconfigure(0, weight=1)
-        self.content_container.grid_columnconfigure(1, weight=1)
-        self.content_container.grid_rowconfigure(0, weight=1)
-
-        self.left_side = customtkinter.CTkFrame(self.content_container)
-        self.left_side.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        self.left_side.grid_rowconfigure(1, weight=1)
-        self.left_side.grid_columnconfigure(1, weight=1)
-
-        self.timer_frame = customtkinter.CTkFrame(self.left_side, corner_radius=6, fg_color="gray30", width=120 if self.display_half else 150)
-        self.timer_frame.grid(row=0, column=0, rowspan=2, padx=(0, 10), pady=10, sticky="ns")
-        self.timer_frame.pack_propagate(False)
-        
-        self.timer_label = customtkinter.CTkLabel(self.timer_frame, text="00:00.00", font=("Helvetica", 30, "bold"), text_color="white")
-        self.timer_label.pack(expand=True, fill="both")
-
-        self.design_frame_0 = TextFrame(self.left_side, "Block Design")
-        self.design_frame_0.grid(row=0, column=1, padx=0, pady=(0, 5), sticky="nsew")
-
-        self.design_frame_1 = ImageFrame(self.left_side, "")
-        self.design_frame_1.grid(row=1, column=1, padx=0, pady=0, sticky="nsew")
-        self.design_frame_1.grid_propagate(False)
-
-        self.frame_width = 400 if self.display_half else 600
-        self.frame_height = 400 if self.display_half else 600
-
-        self.image_label = customtkinter.CTkLabel(master=self.design_frame_1, text='')
-        self.image_label.pack(expand=True, fill="both")
-
-        if not self.hide_camera:
-            self.content_container.grid_columnconfigure(1, weight=3)
-            self.video_frame_1 = ImageFrame(self.content_container, "")
-            self.video_frame_1.grid(row=0, column=1, padx=10, pady=(40, 10), sticky="nsew")
-            self.video_frame_1.grid_propagate(False)
-            self.video_frame_1.grid_rowconfigure(0, weight=1)
-            self.video_frame_1.grid_columnconfigure(0, weight=1)
-            self.camera = customtkinter.CTkLabel(self.video_frame_1, text="", anchor="center")
-            self.camera.grid(row=0, column=0, sticky="nsew")
-        else:
-            self.camera = None
-
-        self.button_0 = customtkinter.CTkButton(self.top_container, text="(START)", font=("Helvetica", 30), command=self.button_0_callback)
-        self.button_0.grid(row=1 if self.display_half else 2, column=0, columnspan=2, padx=20, pady=10, sticky="ew")
-
-        self.bind('<Return>', self.skip_current_level)
-
-    def setup_ai_models(self):
-        self.cap = cv2.VideoCapture(1)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        
-        self.hand_tracker = HandTracker()
-        
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        use_bantal = os.getenv('MODEL_BANTAL', 'false').lower() == 'true'
-        model_yolo = None
-        
-        if use_bantal:
-            path_model = os.path.join(self.base_dir, 'models', 'weights', 'bantal.pt')
-            try:
-                from ultralytics import YOLO
-                model_yolo = YOLO(path_model)
-                model_yolo.to(device)
-            except Exception:
-                use_bantal = False
-                
-        if not use_bantal:
-            path_model = os.path.join(self.base_dir, 'models', 'weights', 'best.pt')
-            try:
-                model_yolo = torch.hub.load(
-                    os.path.join(self.base_dir, 'models', 'yolov5'),
-                    'custom',
-                    path=path_model,
-                    force_reload=True,
-                    source='local'
-                )
-                model_yolo.to(device)
-            except Exception:
-                pass
-
-        if model_yolo is not None:
-            self.yolo_thread = YOLODetectionThread(model_yolo, use_bantal)
-            self.yolo_thread.start()
-        else:
-            self.yolo_thread = None
-            
-        self.yolo_skip_frames = int(os.getenv('YOLO_SKIP_FRAMES', '2'))
-        self.mediapipe_skip_frames = int(os.getenv('MEDIAPIPE_SKIP_FRAMES', '2'))
-
-    def preload_level_images(self):
-        for level in range(1, 9):
-            for variant in ['a', 'b', 'c', 'd']:
-                key = f"{level}{variant}"
-                path = os.path.join(self.base_dir, 'assets', 'images', 'FILES', 'TEST_RANDOM_1500x1500', f'Lvl {key}.png')
-                if os.path.exists(path):
-                    img = Image.open(path)
-                    self.cached_level_images[key] = img.resize((self.frame_width, self.frame_height), Image.Resampling.LANCZOS)
-
-    def get_random_variant(self, level):
-        variants = ['a', 'b', 'c', 'd']
-        return f"{level}{random.choice(variants)}"
-
-    def button_0_callback(self):
-        self.button_0.grid_remove()
-        self.show_current_level_button()
-        play_audio(os.path.join(self.base_dir, 'assets', 'audio', 'hitung_mundur.wav'))
-        self.setup_next_level_state()
-        self.streaming()
-
-    def show_current_level_button(self):
-        self.current_level_button = customtkinter.CTkButton(self.top_container, text=f"Level {self.current_question}", font=("Helvetica", 30))
-        self.current_level_button.grid(row=1, column=0, columnspan=2, padx=20, pady=10, sticky="ew")
-
-    def show_retry_button(self):
-        self.retry_button = customtkinter.CTkButton(self.top_container, text="Retry Test", font=("Helvetica", 30), command=self.destroy)
-        self.retry_button.grid(row=1, column=0, columnspan=2, padx=20, pady=10, sticky="ew")
-
-    def update_timer(self):
-        if self.timer_running:
-            elapsed = time.time() - self.start_time
-            minutes = int(elapsed // 60)
-            seconds = int(elapsed % 60)
-            milliseconds = int((elapsed % 1) * 100)
-            self.timer_label.configure(text=f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}")
-            self.after(50, self.update_timer) 
-
-    def start_timer(self):
-        if not self.timer_running:
-            self.start_time = time.time()
-            self.timer_running = True
-            self.update_timer()
-
-    def reset_timer(self):
-        self.timer_label.configure(text="00:00.00")
-        self.timer_running = False
-
-    def load_level_image(self, variant):
-        if variant in self.cached_level_images:
-            self.image = customtkinter.CTkImage(light_image=self.cached_level_images[variant], size=(self.frame_width, self.frame_height))
-            self.image_label.configure(image=self.image)
-            
-            if self.button_mode:
-                self.image_visible = True
-                self.image_show_time = time.time()
-
-    def handle_button_mode(self):
-        if not self.button_mode:
-            return
-        
-        if self.image_visible and self.image_show_time:
-            if time.time() - self.image_show_time >= self.image_display_duration:
-                blank_image = Image.new('RGB', (self.frame_width, self.frame_height), color='gray')
-                self.image = customtkinter.CTkImage(light_image=blank_image, size=(self.frame_width, self.frame_height))
-                self.image_label.configure(image=self.image)
-                self.image_visible = False
-                self.image_show_time = None
-        
-        if self.serial_thread:
-            message = self.serial_thread.get_message()
-            if message == "disable_image" and not self.image_visible:
-                self.load_level_image(self.current_variant)
-
-    def setup_next_level_state(self):
-        variant = self.get_random_variant(self.current_question)
-        self.current_variant = variant
-        self.load_level_image(variant)
-        if hasattr(self, 'current_level_button'):
-            self.current_level_button.configure(text=f"Level {self.current_question}")
-        self.start_task = time.time()
-        self.reset_timer()
-        self.start_timer()
-
-    def process_level_completion(self, current_time):
-        if not self.task_flags.get(self.current_question, False):
-            return
-
-        time_elapsed = round((current_time - self.start_task), 2)
-        self.timer_task_all.append(time_elapsed)
-        self.cognitive_age_list.append(estimate_cognitive_age(time_elapsed))
-        self.task_flags[self.current_question] = False
-        
-        play_feedback_audio(time_elapsed)
-
-        if self.current_question == self.max_level:
-            self.end_test()
-        else:
-            audio_path = os.path.join(self.base_dir, 'assets', 'audio', f'lanjut_lvl{self.current_question + 1}.wav')
-            if os.path.exists(audio_path):
-                play_audio(audio_path)
-                
-            self.current_question += 1
-            self.setup_next_level_state()
-
-    def skip_current_level(self, event=None):
-        if not self.timer_running:
-            return
-        self.process_level_completion(time.time())
-
-    def end_test(self):
-        self.reset_timer()
-        self.current_level_button.grid_remove()
-        
-        avg_time = sum(self.timer_task_all) / len(self.timer_task_all) if self.timer_task_all else 0
-        age_cog = int(sum(self.cognitive_age_list) / len(self.cognitive_age_list)) if self.cognitive_age_list else self.age_range_code
-        visuo_spatial = 100 if age_cog <= self.age_range_code else 100 - (age_cog - self.age_range_code)
-
-        play_audio(os.path.join(self.base_dir, 'assets', 'audio', 'selesai.wav'))
-        time.sleep(3)
-
-        send_game_session(
-            user_data={"name": self.nick_name, "age": self.age_range_code, "gender": self.gender_code},
-            task_times=self.timer_task_all,
-            cognitive_age=age_cog,
-            visuo_spatial_fit=visuo_spatial
+    def _setup_env(self):
+        self.display_half  = os.getenv("DISPLAY_HALF", "true").lower() == "true"
+        self.hide_camera   = os.getenv("HIDE_CAMERA",  "false").lower() == "true"
+        self.button_mode   = os.getenv("BUTTON_MODE",  "false").lower() == "true"
+        self.debug_mode    = os.getenv("DEBUG_MODE",   "false").lower() == "true"
+        self.max_level     = min(max(int(os.getenv("MAX_LEVEL", "8")), 1), 8)
+        self.yolo_skip     = int(os.getenv("YOLO_SKIP_FRAMES",      "2"))
+        self.mp_skip       = int(os.getenv("MEDIAPIPE_SKIP_FRAMES",  "2"))
+        # Dual camera indices
+        self.cam_game_idx  = int(os.getenv("CAMERA_GAME_INDEX",  os.getenv("CAMERA_INDEX", "0")))
+        self.cam_face_idx  = int(os.getenv("CAMERA_FACE_INDEX",  "1"))
+        self.base_dir      = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
         )
 
-        end_img_path = os.path.join(self.base_dir, 'assets', 'images', 'FILES', 'TEST_1000x1000', '09.jpg')
-        if os.path.exists(end_img_path):
-            self.image = customtkinter.CTkImage(light_image=Image.open(end_img_path), size=(self.frame_width, self.frame_height))
-            self.image_label.configure(image=self.image)
-        self.show_retry_button()
+    def _setup_window(self):
+        self.title("Otak Atik Merah Putih")
+        w, h = (1200, 620) if self.display_half else (1400, 820)
+        self.geometry(f"{w}x{h}")
+        self.configure(fg_color=BG_DARK)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=0)
+        self.grid_columnconfigure(0, weight=1)
 
-    def streaming(self):
-        self.button_0.configure(state="disabled")
-        
-        if hasattr(self, 'cap') and self.cap.isOpened():
-            ret, frame = self.cap.read()
-            
-            if ret and not self.hide_camera and self.camera is not None:
+    def _setup_layout(self):
+        self._main = customtkinter.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
+        self._main.grid(row=0, column=0, sticky="nsew")
+        # Kiri: soal + level + timer | Kanan: 2 kamera
+        self._main.grid_columnconfigure(0, weight=1)
+        self._main.grid_columnconfigure(1, weight=3)
+        self._main.grid_rowconfigure(0, weight=1)
+
+        # ── Left panel ────────────────────────────────────────────
+        self._left = customtkinter.CTkFrame(self._main, fg_color=BG_CARD, corner_radius=12)
+        self._left.grid(row=0, column=0, sticky="nsew", padx=(12,6), pady=12)
+        self._left.grid_columnconfigure(1, weight=1)
+        self._left.grid_rowconfigure(1, weight=1)
+
+        self._level_badge = LevelBadge(self._left, width=90)
+        self._level_badge.grid(row=0, column=0, rowspan=2, padx=(12,8), pady=12, sticky="n")
+
+        customtkinter.CTkLabel(
+            self._left, text="BLOCK DESIGN",
+            font=("Helvetica",10,"bold"), text_color=MUTED,
+        ).grid(row=0, column=1, sticky="w", padx=(0,12), pady=(12,0))
+
+        self._img_frame = customtkinter.CTkFrame(self._left, fg_color="#111", corner_radius=8)
+        self._img_frame.grid(row=1, column=1, sticky="nsew", padx=(0,12), pady=(4,12))
+        self._img_frame.grid_propagate(False)
+
+        self.frame_w = 340 if self.display_half else 480
+        self.frame_h = 340 if self.display_half else 480
+
+        self._img_label = customtkinter.CTkLabel(self._img_frame, text="")
+        self._img_label.pack(expand=True, fill="both")
+
+        self._timer = TimerDisplay(self._left, width=90, font_size=22)
+        self._timer.grid(row=2, column=0, padx=(12,8), pady=(0,8), sticky="ew")
+
+        self._start_btn = customtkinter.CTkButton(
+            self._left, text="▶  MULAI",
+            font=("Helvetica",14,"bold"), height=44,
+            corner_radius=8, fg_color=RED, hover_color="#B71C1C",
+            text_color=WHITE, command=self._on_start,
+        )
+        self._start_btn.grid(row=2, column=1, padx=(0,12), pady=(0,8), sticky="ew")
+
+        # ── Right panel: DualCameraPanel ─────────────────────────
+        if not self.hide_camera:
+            self._cam_panel = DualCameraPanel(self._main)
+            self._cam_panel.grid(row=0, column=1, sticky="nsew", padx=(6,12), pady=12)
+        else:
+            self._cam_panel = None
+
+        # ── Status bar ────────────────────────────────────────────
+        self._status_bar = StatusBar(self)
+        self._status_bar.grid(row=1, column=0, sticky="ew")
+
+        self.bind("<Return>", lambda _: self._on_skip())
+
+    def _setup_game_state(self):
+        self._timer_running = False
+        self._start_time    = 0.0
+        self._start_task    = 0.0
+        self._frame_count   = 0
+        self._fps_counter   = 0
+        self._fps_ts        = time.time()
+        self._latest_boxes  = []
+        self._cached_images = {}
+        self._task_flags    = {i: True for i in range(1, self.max_level+1)}
+        self._timer_all     = []
+        self._cog_ages      = []
+        self._current_q     = 1
+        self._current_variant = ""
+        self._image_visible   = False
+        self._image_show_ts   = 0.0
+        self._image_duration  = 5.0
+        self._level_btn: Optional[customtkinter.CTkButton] = None
+        self._evaluator     = BlockEvaluator()
+        self._cur_emotion   = "neutral"
+
+    def _setup_ai(self):
+        # Game camera (tangan + blok)
+        self._cap_game = cv2.VideoCapture(self.cam_game_idx)
+        self._cap_game.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+        self._cap_game.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        # Face camera
+        self._cap_face = cv2.VideoCapture(self.cam_face_idx)
+        self._cap_face.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+        self._cap_face.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self._face_cam_ok = self._cap_face.isOpened()
+        if not self._face_cam_ok:
+            print(f">>> Kamera wajah (index {self.cam_face_idx}) tidak tersedia.")
+
+        # Hand tracker
+        self._hand_tracker = HandTracker(draw_style="rich")
+
+        # Face mesh drawer (untuk kamera wajah)
+        self._face_mesh = FaceMeshDrawer(
+            draw_tesselation=True, draw_contours=True, draw_iris=True,
+        )
+
+        # Face emotion thread
+        self._face_thread = FaceEmotionThread(smooth_window=5)
+        self._face_thread.start()
+
+        # Voice
+        model_voice = os.path.join(self.base_dir, "models", "vosk-model-small-id")
+        self._voice = VoiceCommandThread(
+            model_name="indonesian-nlp/wav2vec2-large-xlsr-indonesian",
+            vosk_model_path=model_voice,
+            on_command=self._on_voice_command,
+        )
+        self._voice.start()
+        self._status_bar.voice.set_listening(self._voice.is_available)
+
+        # Greeter
+        self._greeter = VoiceGreeter()
+
+        # YOLO
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        use_bantal = os.getenv("MODEL_BANTAL","false").lower() == "true"
+        model_yolo = None
+
+        if use_bantal:
+            p = os.path.join(self.base_dir,"models","weights","bantal.pt")
+            try:
+                from ultralytics import YOLO
+                model_yolo = YOLO(p); model_yolo.to(device)
+            except Exception: use_bantal = False
+
+        if not use_bantal:
+            p = os.path.join(self.base_dir,"models","weights","best.pt")
+            try:
+                model_yolo = torch.hub.load(
+                    os.path.join(self.base_dir,"models","yolov5"),
+                    "custom", path=p, force_reload=True, source="local",
+                ); model_yolo.to(device)
+            except Exception as e:
+                print(f"[YOLO] Gagal load: {e}")
+
+        if model_yolo:
+            self._yolo = YOLODetectionThread(model_yolo, use_bantal, confidence=0.7)
+            self._yolo.start()
+        else:
+            self._yolo = None
+
+    def _preload_images(self):
+        base = os.path.join(self.base_dir,"assets","images","FILES","TEST_RANDOM_1500x1500")
+        for lvl in range(1,9):
+            for var in "abcd":
+                key  = f"{lvl}{var}"
+                path = os.path.join(base, f"Lvl {key}.png")
+                if os.path.exists(path):
+                    img = Image.open(path).resize(
+                        (self.frame_w, self.frame_h), Image.Resampling.LANCZOS
+                    )
+                    self._cached_images[key] = img
+
+
+    def _greet_player(self):
+        name = self.user_data.get("name", "Adik")
+        self._greeter.greet(name)
+
+
+    def _tick(self):
+        if self._timer_running:
+            self._timer.set_time(time.time() - self._start_time)
+            self.after(50, self._tick)
+
+    def _start_timer(self):
+        if not self._timer_running:
+            self._start_time = time.time()
+            self._timer_running = True
+            self._tick()
+
+    def _stop_timer(self):
+        self._timer_running = False
+
+    def _reset_timer(self):
+        self._timer_running = False
+        self._timer.reset()
+
+    def _on_start(self):
+        self._start_btn.grid_remove()
+        self._face_thread.reset_session()
+        self._hand_tracker.reset_session()
+        self._show_level_btn()
+        play_audio(os.path.join(self.base_dir,"assets","audio","hitung_mundur.wav"))
+
+        if self.server_client:
+            self.session_id = self.server_client.start_session(
+                child_id=self.user_data.get("server_id",""),
+                level=self._current_q, variant="1a",
+            )
+        self._next_level()
+        self._stream()
+
+    def _show_level_btn(self):
+        if self._level_btn:
+            self._level_btn.grid_remove()
+        self._level_btn = customtkinter.CTkButton(
+            self._left, text=f"Level {self._current_q}",
+            font=("Helvetica",12,"bold"), height=34,
+            corner_radius=6, fg_color="#1e1e1e",
+            hover_color="#2a2a2a", border_width=1,
+            border_color="#333", text_color=MUTED, state="disabled",
+        )
+        self._level_btn.grid(row=3, column=0, columnspan=2, padx=12, pady=(0,6), sticky="ew")
+
+    def _next_level(self):
+        variant = f"{self._current_q}{random.choice('abcd')}"
+        self._current_variant = variant
+        self._evaluator.set_variant(variant)
+        self._level_badge.set_level(self._current_q)
+        if self._level_btn:
+            self._level_btn.configure(text=f"Level {self._current_q}")
+        self._load_image(variant)
+        self._hand_tracker.reset_session()
+        self._start_task = time.time()
+        self._reset_timer()
+        self._start_timer()
+        self._status_bar.set_attempts(0)
+
+    def _load_image(self, variant: str):
+        img = self._cached_images.get(variant)
+        if not img: return
+        self._img = customtkinter.CTkImage(light_image=img, size=(self.frame_w, self.frame_h))
+        self._img_label.configure(image=self._img)
+        if self.button_mode:
+            self._image_visible = True
+            self._image_show_ts = time.time()
+
+    def _handle_button_mode(self):
+        if not self.button_mode: return
+        if self._image_visible and time.time()-self._image_show_ts >= self._image_duration:
+            blank = Image.new("RGB",(self.frame_w,self.frame_h),"#111")
+            self._img = customtkinter.CTkImage(light_image=blank, size=(self.frame_w,self.frame_h))
+            self._img_label.configure(image=self._img)
+            self._image_visible = False
+        if self.serial_thread:
+            msg = self.serial_thread.get_message()
+            if msg == "disable_image" and not self._image_visible:
+                self._load_image(self._current_variant)
+
+    def _complete_level(self, elapsed: float):
+        if not self._task_flags.get(self._current_q, False): return
+        self._task_flags[self._current_q] = False
+        self._timer_all.append(round(elapsed,2))
+        self._cog_ages.append(estimate_cognitive_age(elapsed))
+        play_feedback_audio(elapsed)
+        self._greeter.say_feedback(elapsed)
+        self._status_bar.set_attempts(self._evaluator.attempt_count)
+
+        if self._current_q >= self.max_level:
+            self._end_game(); return
+
+        nxt = self._current_q + 1
+        audio = os.path.join(self.base_dir,"assets","audio",f"lanjut_lvl{nxt}.wav")
+        if os.path.exists(audio): play_audio(audio)
+        self._greeter.say_level(nxt)
+        self._current_q = nxt
+        self._task_flags[self._current_q] = True
+        self._next_level()
+
+    def _on_skip(self):
+        if self._timer_running:
+            self._complete_level(time.time() - self._start_task)
+
+    def _end_game(self):
+        self._stop_timer()
+        if self._level_btn: self._level_btn.grid_remove()
+
+        avg  = sum(self._timer_all)/len(self._timer_all) if self._timer_all else 0
+        age  = self.user_data.get("age", 0)
+        cog  = int(sum(self._cog_ages)/len(self._cog_ages)) if self._cog_ages else age
+        fit  = 100 if cog <= age else max(0,100-(cog-age))
+        emo  = self._face_thread.get_session_summary()
+        hand = self._hand_tracker.flush_buffer()
+
+        print(f"=== HASIL === Avg: {avg:.2f}s | CogAge: {cog} | Fitness: {fit}%")
+        if emo: print(f"Emosi dominan: {emo.get('dominant')}")
+
+        play_audio(os.path.join(self.base_dir,"assets","audio","selesai.wav"))
+        self._greeter.say_finish()
+
+        if self.server_client and self.session_id:
+            self.server_client.end_session(SessionResult(
+                session_id=self.session_id,
+                child_id=self.user_data.get("server_id",""),
+                robot_id=self.server_client.robot_id,
+                waktu_solve=avg, skor=fit,
+                jumlah_percobaan=self._evaluator.attempt_count,
+                status="completed", hand_logs=hand,
+            ))
+
+        end_img = os.path.join(self.base_dir,"assets","images","FILES","TEST_1000x1000","09.jpg")
+        if os.path.exists(end_img):
+            img = Image.open(end_img).resize((self.frame_w,self.frame_h), Image.Resampling.LANCZOS)
+            self._img = customtkinter.CTkImage(light_image=img, size=(self.frame_w,self.frame_h))
+            self._img_label.configure(image=self._img)
+
+        customtkinter.CTkButton(
+            self._left, text="↺  MAIN LAGI",
+            font=("Helvetica",13,"bold"), height=44,
+            corner_radius=8, fg_color="#1a3a1a",
+            hover_color="#22c55e", text_color="#22c55e",
+            command=self.destroy,
+        ).grid(row=3, column=0, columnspan=2, padx=12, pady=(0,12), sticky="ew")
+
+    def _on_voice_command(self, event):
+        self.after(0, lambda: self._dispatch_voice(event.command))
+
+    def _dispatch_voice(self, cmd: str):
+        self._status_bar.voice.show_command(cmd)
+        if cmd == "start" and self._start_btn.winfo_ismapped():
+            self._on_start()
+        elif cmd == "skip":
+            self._on_skip()
+        elif cmd == "retry":
+            self.destroy()
+
+    def _stream(self):
+        self._handle_button_mode()
+
+        if self._cap_game.isOpened():
+            ret, frame = self._cap_game.read()
+            if ret:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                if self.frame_count % (self.mediapipe_skip_frames + 1) == 0:
-                    frame_rgb, landmarks = self.hand_tracker.process_and_draw(frame_rgb)
-                
-                imgBlur = cv2.GaussianBlur(frame_rgb, (7,7), 1)
-                imgGray = cv2.cvtColor(imgBlur, cv2.COLOR_RGB2GRAY)
-                _, imgThres = cv2.threshold(imgGray, 175, 255, cv2.THRESH_BINARY)
 
-                if self.yolo_thread is not None:
-                    if self.frame_count % (self.yolo_skip_frames + 1) == 0:
-                        if self.yolo_thread.frame_queue.empty():
-                            try:
-                                self.yolo_thread.frame_queue.put_nowait(np.array(frame, copy=True))
-                            except:
-                                pass
-                                
-                    if not self.yolo_thread.result_queue.empty():
-                        try:
-                            self.latest_detections = self.yolo_thread.result_queue.get_nowait()
-                        except:
-                            pass
+                if self._frame_count % (self.mp_skip+1) == 0:
+                    frame_rgb, _ = self._hand_tracker.process_and_draw(frame_rgb)
 
-                    box_design = []
-                    box_distance = []
-                    pos_x = []
-                    pos_y = []
+                if self._yolo:
+                    if self._frame_count % (self.yolo_skip+1) == 0:
+                        self._yolo.submit_frame(frame)
+                    result = self._yolo.get_result()
+                    if result:
+                        self._latest_boxes = result.boxes
 
-                    for x1, y1, x2, y2, conf_pred, cls_id, cls in self.latest_detections:
-                        if conf_pred > 0.7:
-                            center_x = int((x1+x2)/2)
-                            center_y = int((y1+y2)/2)
-                            x1, x2, y1, y2 = int(x1), int(x2), int(y1), int(y2)
-                            
-                            box_distance.append(int(math.sqrt(pow(center_x, 2) + pow(center_y, 2))))
-                            pos_x.append(center_x)
-                            pos_y.append(center_y)
-                            
-                            if y1 >= 0 and y2 <= imgThres.shape[0] and x1 >= 0 and x2 <= imgThres.shape[1] and (y2-y1) > 0 and (x2-x1) > 0:
-                                dim = (100, 100)
-                                imgBox = cv2.resize(imgThres[y1:y2, x1:x2], dim, interpolation=cv2.INTER_AREA)
-                                box_class = [imgBox[50,25], imgBox[75,50], imgBox[50,75], imgBox[25,50]]
-                                
-                                box_face = 0
-                                if box_class == [0,0,0,0]: box_face = 1
-                                elif box_class == [255,255,255,255]: box_face = 2
-                                elif box_class == [255,255,0,0]: box_face = 3
-                                elif box_class == [255,0,0,255]: box_face = 4
-                                elif box_class == [0,0,255,255]: box_face = 5
-                                elif box_class == [0,255,255,0]: box_face = 6
-                                
-                                if box_face > 0:
-                                    box_design.append(box_face)
-                                    cv2.rectangle(frame_rgb, (x1,y1), (x2, y2), (0, 255, 0), 2)
+                    for box in self._latest_boxes:
+                        x1,y1,x2,y2 = int(box[0]),int(box[1]),int(box[2]),int(box[3])
+                        cv2.rectangle(frame_rgb,(x1,y1),(x2,y2),(255,80,80),2)
 
-                    if len(box_design) == 4 and len(box_distance) == 4:
-                        pts = np.array([[pos_x[i], pos_y[i]] for i in range(4)], np.int32)
-                        for i in range(4):
-                            for j in range(i+1, 4):
-                                cv2.line(frame_rgb, tuple(pts[i]), tuple(pts[j]), (0, 0, 0), 2)
-                                
-                        len_rect = sorted([
-                            int(math.sqrt((pos_x[0]-pos_x[1])**2 + (pos_y[0]-pos_y[1])**2)),
-                            int(math.sqrt((pos_x[1]-pos_x[2])**2 + (pos_y[1]-pos_y[2])**2)),
-                            int(math.sqrt((pos_x[2]-pos_x[3])**2 + (pos_y[2]-pos_y[3])**2)),
-                            int(math.sqrt((pos_x[3]-pos_x[0])**2 + (pos_y[3]-pos_y[0])**2)),
-                            int(math.sqrt((pos_x[0]-pos_x[2])**2 + (pos_y[0]-pos_y[2])**2)),
-                            int(math.sqrt((pos_x[1]-pos_x[3])**2 + (pos_y[1]-pos_y[3])**2))
-                        ])
-                        
-                        if all(abs(len_rect[0] - len_rect[i]) < 100 for i in range(1, 4)) and \
-                           all(abs(len_rect[1] - len_rect[i]) < 100 for i in range(2, 4)) and \
-                           abs(len_rect[2] - len_rect[3]) < 100:
-                           
-                            indexed_positions = [(pos_x[i], pos_y[i], i) for i in range(4)]
-                            sorted_by_x = sorted(pos_x)
-                            mid_point = (sorted_by_x[1] + sorted_by_x[2]) / 2 
-                            indexed_positions.sort(key=lambda p: (p[0] >= mid_point, p[1]))
-                            sort_index = [idx for (x, y, idx) in indexed_positions]
-                            box_design_sort = [box_design[i] for i in sort_index]
-                            
-                            current_answer = self.level_answers.get(self.current_variant, [])
-                            if box_design_sort == current_answer:
-                                self.process_level_completion(time.time())
+                    if len(self._latest_boxes) == 4:
+                        boxes = self._latest_boxes
+                        is_ok, _ = self._evaluator.check(
+                            pos_x=[(b[0]+b[2])/2 for b in boxes],
+                            pos_y=[(b[1]+b[3])/2 for b in boxes],
+                            designs=[],
+                        )
+                        if is_ok:
+                            self._complete_level(time.time()-self._start_task)
 
-                img = Image.fromarray(frame_rgb)
-                container_width = self.video_frame_1.winfo_width()
-                container_height = self.video_frame_1.winfo_height()
-                
-                if container_width > 10 and container_height > 10:
-                    frame_height, frame_width = frame.shape[:2]
-                    width_ratio = container_width / frame_width
-                    height_ratio = container_height / frame_height
-                    scale = min(width_ratio, height_ratio)
-                    
-                    if scale < 1:
-                        new_width = int(frame_width * scale)
-                        new_height = int(frame_height * scale)
-                        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                
-                ImgTks = ImageTk.PhotoImage(image=img)
-                self.camera.imgtk = ImgTks
-                self.camera.configure(image=ImgTks)
+                if self._cam_panel:
+                    self._cam_panel.update_game_frame(Image.fromarray(frame_rgb))
 
-        self.frame_count += 1
-        self.after(10, self.streaming)
+        if self._face_cam_ok and self._cap_face.isOpened():
+            ret_f, frame_f = self._cap_face.read()
+            if ret_f:
+                frame_f_rgb = cv2.cvtColor(frame_f, cv2.COLOR_BGR2RGB)
+
+                if self._frame_count % 15 == 0:
+                    self._face_thread.submit_frame(frame_f_rgb.copy())
+
+                emo = self._face_thread.get_emotion()
+                if emo:
+                    self._cur_emotion = emo
+                    self._status_bar.emotion.set_emotion(emo)
+
+                frame_f_rgb = self._face_mesh.draw(frame_f_rgb, self._cur_emotion)
+
+                if self._cam_panel:
+                    self._cam_panel.update_face_frame(Image.fromarray(frame_f_rgb))
+
+        self._frame_count += 1
+        self._fps_counter += 1
+        if time.time() - self._fps_ts >= 1.0:
+            self._status_bar.set_fps(self._fps_counter)
+            self._fps_counter = 0
+            self._fps_ts = time.time()
+            if self.server_client:
+                self._status_bar.set_server_online(self.server_client.is_online)
+
+        self.after(10, self._stream)
 
     def cleanup(self):
-        if self.serial_thread:
-            self.serial_thread.stop()
-        if hasattr(self, 'hand_tracker'):
-            self.hand_tracker.close()
-        if hasattr(self, 'cap') and self.cap.isOpened():
-            self.cap.release()
-        if hasattr(self, 'yolo_thread') and self.yolo_thread:
-            self.yolo_thread.stop()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        for cap in (self._cap_game, self._cap_face):
+            if cap and cap.isOpened(): cap.release()
+        if getattr(self, "_yolo", None):    self._yolo.stop()
+        if getattr(self, "_face_thread", None): self._face_thread.stop()
+        if getattr(self, "_voice", None):   self._voice.stop()
+        if getattr(self, "_hand_tracker", None): self._hand_tracker.close()
+        if getattr(self, "_face_mesh", None): self._face_mesh.close()
+        if self.serial_thread: self.serial_thread.stop()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
 
     def destroy(self):
         self.cleanup()

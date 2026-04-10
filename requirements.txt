@@ -21,3 +21,10 @@ python-dotenv
 mediapipe
 ultralytics
 pyserial
+dotenv
+vosk
+sounddevice
+deepface
+tf-keras
+mediapipe
+transformers

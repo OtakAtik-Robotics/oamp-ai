@@ -22,14 +22,14 @@ def play_audio(wav):
 
 def play_feedback_audio(time_elapsed):
     if time_elapsed < 10:
-        play_audio("assets/audio/menakjubkan.wav")
+        play_audio("oamp-ai/assets/audio/menakjubkan.wav")
     elif time_elapsed < 15:
-        play_audio("assets/audio/hebat_sekali.wav")
+        play_audio("oamp-ai/assets/audio/hebat_sekali.wav")
     elif time_elapsed < 20:
-        play_audio("assets/audio/mantap.wav")
+        play_audio("oamp-ai/assets/audio/mantap.wav")
     elif time_elapsed < 25:
-        play_audio("assets/audio/kerja_bagus.wav")
+        play_audio("oamp-ai/assets/audio/kerja_bagus.wav")
     elif time_elapsed < 30:
-        play_audio("assets/audio/ayo_semangat.wav")
+        play_audio("oamp-ai/assets/audio/ayo_semangat.wav")
     else:
-        play_audio("assets/audio/jangan_menyerah.wav")
+        play_audio("oamp-ai/assets/audio/jangan_menyerah.wav")
