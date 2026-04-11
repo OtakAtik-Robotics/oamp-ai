@@ -84,7 +84,7 @@ class GameWindow(customtkinter.CTk):
         self._main = customtkinter.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
         self._main.grid(row=0, column=0, sticky="nsew")
         # Kiri: soal + level + timer | Kanan: 2 kamera
-        self._main.grid_columnconfigure(0, weight=1)
+        self._main.grid_columnconfigure(0, weight=2)
         self._main.grid_columnconfigure(1, weight=3)
         self._main.grid_rowconfigure(0, weight=1)
 
@@ -158,12 +158,12 @@ class GameWindow(customtkinter.CTk):
         self._cur_emotion   = "neutral"
 
     def _setup_ai(self):
-        # Game camera (tangan + blok)
+        # Game camera
         self._cap_game = cv2.VideoCapture(self.cam_game_idx)
         self._cap_game.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         self._cap_game.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-        # Face camera (hanya jika di-enable)
+        # Face camera
         if self.enable_face:
             self._cap_face = cv2.VideoCapture(self.cam_face_idx)
             self._cap_face.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
@@ -179,7 +179,7 @@ class GameWindow(customtkinter.CTk):
         # Hand tracker
         self._hand_tracker = HandTracker(draw_style="rich")
 
-        # Face mesh drawer (hanya jika face camera aktif)
+        # Face mesh drawer
         if self._face_cam_ok:
             self._face_mesh = FaceMeshDrawer(
                 draw_tesselation=True, draw_contours=True, draw_iris=True,
@@ -187,14 +187,14 @@ class GameWindow(customtkinter.CTk):
         else:
             self._face_mesh = None
 
-        # Face emotion thread (hanya jika face camera aktif)
+        # Face emotion thread
         if self._face_cam_ok:
             self._face_thread = FaceEmotionThread(smooth_window=5)
             self._face_thread.start()
         else:
             self._face_thread = None
 
-        # Voice (hanya jika di-enable)
+        # Voice
         if self.enable_voice:
             model_voice = os.path.join(self.base_dir, "models", "vosk-model-small-id")
             self._voice = VoiceCommandThread(
@@ -277,19 +277,22 @@ class GameWindow(customtkinter.CTk):
         self._timer.reset()
 
     def _on_start(self):
+        print(">>> [DEBUG] _on_start called")
         self._start_btn.grid_remove()
         if self._face_thread:
             self._face_thread.reset_session()
         self._hand_tracker.reset_session()
         self._show_level_btn()
+        print(">>> [DEBUG] playing audio...")
         play_audio(os.path.join(self.base_dir,"assets","audio","hitung_mundur.wav"))
-
+        print(">>> [DEBUG] audio done, calling _next_level")
         if self.server_client:
             self.session_id = self.server_client.start_session(
                 child_id=self.user_data.get("server_id",""),
                 level=self._current_q, variant="1a",
             )
         self._next_level()
+        print(">>> [DEBUG] _next_level done, starting _stream")
         self._stream()
 
     def _show_level_btn(self):
@@ -422,57 +425,65 @@ class GameWindow(customtkinter.CTk):
     def _stream(self):
         self._handle_button_mode()
 
-        if self._cap_game.isOpened():
-            ret, frame = self._cap_game.read()
-            if ret:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        try:
+            if self._cap_game.isOpened():
+                ret, frame = self._cap_game.read()
+                if ret:
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                if self._frame_count % (self.mp_skip+1) == 0:
-                    frame_rgb, _ = self._hand_tracker.process_and_draw(frame_rgb)
+                    if self._frame_count % (self.mp_skip+1) == 0:
+                        self._hand_tracker.detect(frame_rgb)
 
-                if self._yolo:
-                    if self._frame_count % (self.yolo_skip+1) == 0:
-                        self._yolo.submit_frame(frame)
-                    result = self._yolo.get_result()
-                    if result:
-                        self._latest_boxes = result.boxes
+                    frame_rgb = self._hand_tracker.draw_cached(frame_rgb)
 
-                    for box in self._latest_boxes:
-                        x1,y1,x2,y2 = int(box[0]),int(box[1]),int(box[2]),int(box[3])
-                        cv2.rectangle(frame_rgb,(x1,y1),(x2,y2),(255,80,80),2)
+                    if self._yolo:
+                        if self._frame_count % (self.yolo_skip+1) == 0:
+                            self._yolo.submit_frame(frame)
+                        result = self._yolo.get_result()
+                        if result:
+                            self._latest_boxes = result.boxes
 
-                    if len(self._latest_boxes) == 4:
-                        boxes = self._latest_boxes
-                        is_ok, _ = self._evaluator.check(
-                            pos_x=[(b[0]+b[2])/2 for b in boxes],
-                            pos_y=[(b[1]+b[3])/2 for b in boxes],
-                            designs=[],
-                        )
-                        if is_ok:
-                            self._complete_level(time.time()-self._start_task)
+                        for box in self._latest_boxes:
+                            x1,y1,x2,y2 = int(box[0]),int(box[1]),int(box[2]),int(box[3])
+                            cv2.rectangle(frame_rgb,(x1,y1),(x2,y2),(255,80,80),2)
 
-                if self._cam_panel:
-                    self._cam_panel.update_game_frame(Image.fromarray(frame_rgb))
+                        if len(self._latest_boxes) == 4:
+                            boxes = self._latest_boxes
+                            is_ok, _ = self._evaluator.check(
+                                pos_x=[(b[0]+b[2])/2 for b in boxes],
+                                pos_y=[(b[1]+b[3])/2 for b in boxes],
+                                designs=[],
+                            )
+                            if is_ok:
+                                self._complete_level(time.time()-self._start_task)
 
-        if self._face_cam_ok and self._cap_face and self._cap_face.isOpened():
-            ret_f, frame_f = self._cap_face.read()
-            if ret_f:
-                frame_f_rgb = cv2.cvtColor(frame_f, cv2.COLOR_BGR2RGB)
+                    if self._cam_panel:
+                        self._cam_panel.update_game_frame(Image.fromarray(frame_rgb))
 
-                if self._face_thread and self._frame_count % 15 == 0:
-                    self._face_thread.submit_frame(frame_f_rgb.copy())
+            if self._face_cam_ok and self._cap_face and self._cap_face.isOpened():
+                ret_f, frame_f = self._cap_face.read()
+                if ret_f:
+                    frame_f_rgb = cv2.cvtColor(frame_f, cv2.COLOR_BGR2RGB)
 
-                if self._face_thread:
-                    emo = self._face_thread.get_emotion()
-                    if emo:
-                        self._cur_emotion = emo
-                        self._status_bar.emotion.set_emotion(emo)
+                    if self._face_thread and self._frame_count % 15 == 0:
+                        self._face_thread.submit_frame(frame_f_rgb.copy())
 
-                if self._face_mesh:
-                    frame_f_rgb = self._face_mesh.draw(frame_f_rgb, self._cur_emotion)
+                    if self._face_thread:
+                        emo = self._face_thread.get_emotion()
+                        if emo:
+                            self._cur_emotion = emo
+                            self._status_bar.emotion.set_emotion(emo)
 
-                if self._cam_panel:
-                    self._cam_panel.update_face_frame(Image.fromarray(frame_f_rgb))
+                    if self._face_mesh:
+                        frame_f_rgb = self._face_mesh.draw(frame_f_rgb, self._cur_emotion)
+
+                    if self._cam_panel:
+                        self._cam_panel.update_face_frame(Image.fromarray(frame_f_rgb))
+
+        except Exception as e:
+            print(f">>> [DEBUG] _stream error: {e}")
+            import traceback
+            traceback.print_exc()
 
         self._frame_count += 1
         self._fps_counter += 1

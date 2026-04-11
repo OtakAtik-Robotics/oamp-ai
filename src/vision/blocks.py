@@ -36,23 +36,16 @@ class YOLODetectionThread(threading.Thread):
             results = self.model(frame, verbose=False)
             if not results or not hasattr(results[0], "boxes"):
                 return []
-            detections = []
-            for box in results[0].boxes:
-                conf = float(box.conf[0].cpu().numpy())
-                if conf < self.confidence:
-                    continue
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                cls_id = int(box.cls[0].cpu().numpy())
-                detections.append([x1, y1, x2, y2, conf, cls_id, ""])
-            return detections
+            data = results[0].boxes.data.cpu().numpy()  # (N, 6): x1,y1,x2,y2,conf,cls
+            mask = data[:, 4] >= self.confidence
+            return [row.tolist() + [""] for row in data[mask]]
         else:
             results = self.model(frame)
-            df = results.pandas().xyxy[0]
-            return [
-                row.tolist()
-                for _, row in df.iterrows()
-                if row["confidence"] >= self.confidence
-            ]
+            pred = results.xyxy[0]  # raw tensor (N, 6+)
+            data = pred.cpu().numpy() if pred.is_cuda else pred.numpy()
+            mask = data[:, 4] >= self.confidence
+            return [row[:6].tolist() + [row[6] if len(row) > 6 else ""]
+                    for row in data[mask]]
 
     def _update_metrics(self, elapsed_ms):
         self.last_inference_ms = elapsed_ms

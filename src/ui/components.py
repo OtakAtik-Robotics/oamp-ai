@@ -127,29 +127,32 @@ class EmotionDisplay(customtkinter.CTkFrame):
 class DualCameraPanel(customtkinter.CTkFrame):
     def __init__(self, master, **kw):
         super().__init__(master, fg_color="#111111", corner_radius=12, **kw)
-        self.grid_columnconfigure(0, weight=3)
-        self.grid_columnconfigure(1, weight=2)
+        self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(3, weight=1)
 
+        # Label game camera
         customtkinter.CTkLabel(
-            self, text="🎮  KAMERA PERMAINAN",
-            font=("Helvetica",10,"bold"), text_color="#555",
+            self, text="KAMERA PERMAINAN",
+            font=("Helvetica",9,"bold"), text_color="#555",
         ).grid(row=0, column=0, sticky="w", padx=10, pady=(8,2))
 
-        customtkinter.CTkLabel(
-            self, text="😊  KAMERA WAJAH",
-            font=("Helvetica",10,"bold"), text_color="#555",
-        ).grid(row=0, column=1, sticky="w", padx=10, pady=(8,2))
-
         self._game_cam = customtkinter.CTkLabel(self, text="", anchor="center")
-        self._game_cam.grid(row=1, column=0, sticky="nsew", padx=(8,4), pady=(0,8))
+        self._game_cam.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0,4))
 
+        # Separator
         customtkinter.CTkFrame(
-            self, fg_color="#222", width=1,
-        ).grid(row=0, column=2, rowspan=2, sticky="ns", pady=8)
+            self, fg_color="#222", height=1,
+        ).grid(row=2, column=0, sticky="ew", padx=10)
+
+        # Label face camera
+        customtkinter.CTkLabel(
+            self, text="KAMERA WAJAH",
+            font=("Helvetica",9,"bold"), text_color="#555",
+        ).grid(row=2, column=0, sticky="w", padx=10, pady=(2,2))
 
         self._face_cam = customtkinter.CTkLabel(self, text="", anchor="center")
-        self._face_cam.grid(row=1, column=1, sticky="nsew", padx=(4,8), pady=(0,8))
+        self._face_cam.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0,8))
 
     def update_game_frame(self, pil_image: Image.Image):
         w = self._game_cam.winfo_width()

@@ -76,6 +76,7 @@ class HandTracker:
         self._movement_buffer: List[HandMovementSample] = []
         self._last_pos: Optional[Tuple[float,float]] = None
         self._last_ts:  Optional[float] = None
+        self._cached_hands: list = []  # landmark terakhir yang valid
 
         if not _HAS_MP or not os.path.isfile(_HAND_MODEL):
             print(f">>> MediaPipe tidak tersedia atau model tidak ditemukan: {_HAND_MODEL}")
@@ -135,12 +136,11 @@ class HandTracker:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                         (255,255,255), 1, cv2.LINE_AA)
 
-    def process_and_draw(self, frame):
-        if not self.available or self._landmarker is None:
-            return frame, []
-
-        if cv2 is None:
-            return frame, []
+    def detect(self, frame):
+        """Run detection, cache landmarks, return movement samples."""
+        if not self.available or self._landmarker is None or cv2 is None:
+            self._cached_hands = []
+            return []
 
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
@@ -148,14 +148,41 @@ class HandTracker:
         samples: List[HandMovementSample] = []
 
         if not results.hand_landmarks:
+            self._cached_hands = []
             self._last_pos = None
             self._last_ts  = None
-            return frame, []
+            return []
+
+        self._cached_hands = results.hand_landmarks
 
         now   = time.time()
         ts_ms = int((now - self._session_start) * 1000)
 
         for hand_landmarks in results.hand_landmarks:
+            wrist = hand_landmarks[0]
+            cx, cy = wrist.x, wrist.y
+            kecepatan = 0.0
+            if self._last_pos is not None and self._last_ts is not None:
+                dt_ms = (now - self._last_ts) * 1000
+                if dt_ms > 0:
+                    dx = (cx - self._last_pos[0]) * 1000
+                    dy = (cy - self._last_pos[1]) * 1000
+                    kecepatan = round(math.sqrt(dx*dx+dy*dy)/dt_ms, 4)
+
+            self._last_pos = (cx, cy)
+            self._last_ts  = now
+            s = HandMovementSample(ts_ms, round(cx,4), round(cy,4), kecepatan)
+            samples.append(s)
+            self._movement_buffer.append(s)
+
+        return samples
+
+    def draw_cached(self, frame):
+        """Draw last cached landmarks on a fresh frame."""
+        if not self._cached_hands or cv2 is None:
+            return frame
+
+        for hand_landmarks in self._cached_hands:
             if self.draw_style == "rich":
                 self._draw_rich(frame, hand_landmarks)
             else:
@@ -173,27 +200,12 @@ class HandTracker:
                     cv2.circle(frame, self._px(lmk, w_img, h_img),
                                3, (0, 255, 0), -1, cv2.LINE_AA)
 
-            wrist = hand_landmarks[0]
-            cx, cy = wrist.x, wrist.y
-            kecepatan = 0.0
-            if self._last_pos is not None and self._last_ts is not None:
-                dt_ms = (now - self._last_ts) * 1000
-                if dt_ms > 0:
-                    dx = (cx - self._last_pos[0]) * 1000
-                    dy = (cy - self._last_pos[1]) * 1000
-                    kecepatan = round(math.sqrt(dx*dx+dy*dy)/dt_ms, 4)
-
-            self._last_pos = (cx, cy)
-            self._last_ts  = now
-            s = HandMovementSample(ts_ms, round(cx,4), round(cy,4), kecepatan)
-            samples.append(s)
-            self._movement_buffer.append(s)
-
-        return frame, samples
+        return frame
 
     def reset_session(self, session_start: Optional[float] = None):
         self._session_start = session_start or time.time()
         self._movement_buffer.clear()
+        self._cached_hands = []
         self._last_pos = None
         self._last_ts  = None
 

@@ -147,16 +147,17 @@ class Wav2Vec2RecogThread(threading.Thread):
         model_name: str = "indonesian-nlp/wav2vec2-indonesian-javanese-sundanese",
         vosk_model_path: Optional[str] = None,
         on_command: Optional[Callable[[VoiceEvent], None]] = None,
+        cooldown_sec: float = 2.5,
     ):
         super().__init__(daemon=True, name="Wav2Vec2Recog")
         self.on_command    = on_command
         self.command_queue: queue.Queue[VoiceEvent] = queue.Queue()
-        self.audio_buffer  = np.array([], dtype=np.float32)
-        self._audio_lock   = threading.Lock()
         self.status        = VoiceStatus()
         self.running       = True
         self.is_available  = False
-        self._mode         = None 
+        self._mode         = None
+        self._cooldown_sec = cooldown_sec
+        self._last_command_ts = 0.0
 
         self._load_wav2vec2(model_name)
 
@@ -219,12 +220,24 @@ class Wav2Vec2RecogThread(threading.Thread):
             print(f"[Wav2Vec2] Inference error: {e}")
             return ""
 
-
-    def _audio_cb(self, indata, frames, time_info, status):
-        chunk = indata[:, 0].astype(np.float32)
-        with self._audio_lock:
-            self.audio_buffer = np.concatenate([self.audio_buffer, chunk])
-
+    def _calibrate(self) -> float:
+        """Rekam 3 detik silence, ukur noise floor, return threshold."""
+        import sounddevice as sd
+        print(">>> Kalibrasi mic (diamkan 3 detik)...")
+        samples = []
+        for _ in range(3):
+            audio = sd.rec(
+                int(SAMPLERATE * 1), samplerate=SAMPLERATE,
+                channels=1, dtype="float32",
+            )
+            sd.wait()
+            samples.append(audio)
+        all_audio = np.concatenate(samples)
+        rms_values = [np.sqrt(np.mean(s ** 2)) for s in samples]
+        noise_rms = np.median(rms_values)
+        threshold = max(noise_rms * 3.0, 0.015)
+        print(f">>> Kalibrasi selesai. Noise floor: {noise_rms:.4f}, Threshold: {threshold:.4f}")
+        return threshold
 
     def _parse(self, text: str) -> Optional[str]:
         text = text.lower().strip()
@@ -254,7 +267,7 @@ class Wav2Vec2RecogThread(threading.Thread):
 
         import sounddevice as sd
 
-        VOLUME_THRESHOLD = 0.04
+        threshold = self._calibrate()
 
         while self.running:
             try:
@@ -266,7 +279,7 @@ class Wav2Vec2RecogThread(threading.Thread):
 
                 rms = np.sqrt(np.mean(audio_data ** 2))
 
-                if rms < VOLUME_THRESHOLD:
+                if rms < threshold:
                     continue
 
                 self.status.update(VoiceStatus.LISTENING)
@@ -280,7 +293,12 @@ class Wav2Vec2RecogThread(threading.Thread):
                 print(f"[Mic] (Vol: {rms:.3f}) Mendengar: {text}")
                 cmd = self._parse(text)
                 if cmd:
-                    self._emit(text, cmd)
+                    now = time.time()
+                    if now - self._last_command_ts >= self._cooldown_sec:
+                        self._last_command_ts = now
+                        self._emit(text, cmd)
+                    else:
+                        print(f"[Voice] Cooldown, skip '{text}'")
                 else:
                     self.status.update(VoiceStatus.IDLE)
 
