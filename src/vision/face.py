@@ -1,4 +1,5 @@
 
+import os
 import time
 import threading
 from collections import Counter, deque
@@ -14,11 +15,24 @@ except ImportError:
 
 try:
     import mediapipe as mp
-    _mp_solutions = getattr(mp, "solutions", None)
-    if _mp_solutions is None:
-        from mediapipe.python import solutions as _mp_solutions
-except ImportError:
-    _mp_solutions = None
+    from mediapipe.tasks.python import BaseOptions
+    from mediapipe.tasks.python.vision import (
+        FaceLandmarker,
+        FaceLandmarkerOptions,
+        FaceLandmarksConnections,
+        RunningMode,
+        drawing_utils as _mp_drawing_utils,
+        drawing_styles as _mp_drawing_styles,
+    )
+    _HAS_MP = True
+except Exception as e:
+    print(f">>> [DEBUG] Gagal load MediaPipe: {e}")
+    _HAS_MP = False
+
+
+# ── Model path ──────────────────────────────────────────────────────
+_MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "models", "weights")
+_FACE_MODEL = os.path.normpath(os.path.join(_MODEL_DIR, "face_landmarker.task"))
 
 
 EMOTION_DISPLAY = {
@@ -38,72 +52,89 @@ class FaceMeshDrawer:
         draw_contours: bool = True,
         draw_iris: bool = True,
     ):
-        self.available = _mp_solutions is not None and _HAS_CV2
         self._draw_tess    = draw_tesselation
         self._draw_cont    = draw_contours
         self._draw_iris    = draw_iris
 
-        if not self.available:
-            print(">>> MediaPipe tidak tersedia. Face mesh disabled.")
-            self._face_mesh = None
+        if not _HAS_MP or not _HAS_CV2 or not os.path.isfile(_FACE_MODEL):
+            print(f">>> MediaPipe tidak tersedia atau model tidak ditemukan: {_FACE_MODEL}")
+            self.available = False
+            self._landmarker = None
             return
 
-        self._mp_face_mesh = _mp_solutions.face_mesh
-        self._drawing      = _mp_solutions.drawing_utils
-        self._drawing_styles = _mp_solutions.drawing_styles
-
-        self._face_mesh = self._mp_face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True,   
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-
-        self._tess_style = self._drawing.DrawingSpec(
-            color=(40, 40, 40), thickness=1, circle_radius=1,
-        )
-        self._contour_style = self._drawing.DrawingSpec(
-            color=(0, 220, 80), thickness=1, circle_radius=1,
-        )
-        self._iris_style = self._drawing.DrawingSpec(
-            color=(0, 180, 255), thickness=1, circle_radius=1,
-        )
+        try:
+            options = FaceLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=_FACE_MODEL),
+                running_mode=RunningMode.IMAGE,
+                min_face_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
+                num_faces=1,
+                output_facial_transformation_matrixes=False,
+                output_face_blendshapes=False,
+            )
+            self._landmarker = FaceLandmarker.create_from_options(options)
+            self.available = True
+        except Exception as e:
+            print(f">>> [DEBUG] Gagal inisialisasi FaceLandmarker: {e}")
+            self.available = False
+            self._landmarker = None
 
     def draw(self, frame, emotion_label: str = "") -> "frame":
-        if not self.available or self._face_mesh is None:
+        if not self.available or self._landmarker is None:
             return frame
 
-        results = self._face_mesh.process(frame)
-        if not results.multi_face_landmarks:
+        if cv2 is None:
             return frame
 
-        for face_landmarks in results.multi_face_landmarks:
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        results = self._landmarker.detect(mp_image)
+
+        if not results.face_landmarks:
+            return frame
+
+        for face_landmarks in results.face_landmarks:
+            h_img, w_img = frame.shape[:2]
+
             if self._draw_tess:
-                self._drawing.draw_landmarks(
-                    image=frame,
-                    landmark_list=face_landmarks,
-                    connections=self._mp_face_mesh.FACEMESH_TESSELATION,
-                    landmark_drawing_spec=None,
-                    connection_drawing_spec=self._tess_style,
-                )
+                tess_style = _mp_drawing_styles.get_default_face_mesh_tesselation_style()
+                for conn in FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION:
+                    start_lm = face_landmarks[conn.start]
+                    end_lm   = face_landmarks[conn.end]
+                    cv2.line(frame,
+                             (int(start_lm.x * w_img), int(start_lm.y * h_img)),
+                             (int(end_lm.x * w_img), int(end_lm.y * h_img)),
+                             tess_style.color, tess_style.thickness, cv2.LINE_AA)
 
             if self._draw_cont:
-                self._drawing.draw_landmarks(
-                    image=frame,
-                    landmark_list=face_landmarks,
-                    connections=self._mp_face_mesh.FACEMESH_CONTOURS,
-                    landmark_drawing_spec=None,
-                    connection_drawing_spec=self._contour_style,
-                )
+                contour_styles = _mp_drawing_styles.get_default_face_mesh_contours_style()
+                for conn in FaceLandmarksConnections.FACE_LANDMARKS_CONTOURS:
+                    start_lm = face_landmarks[conn.start]
+                    end_lm   = face_landmarks[conn.end]
+                    style = contour_styles.get((conn.start, conn.end),
+                              contour_styles.get((conn.end, conn.start)))
+                    if style:
+                        cv2.line(frame,
+                                 (int(start_lm.x * w_img), int(start_lm.y * h_img)),
+                                 (int(end_lm.x * w_img), int(end_lm.y * h_img)),
+                                 style.color, style.thickness, cv2.LINE_AA)
 
-            if self._draw_iris and hasattr(self._mp_face_mesh, "FACEMESH_IRISES"):
-                self._drawing.draw_landmarks(
-                    image=frame,
-                    landmark_list=face_landmarks,
-                    connections=self._mp_face_mesh.FACEMESH_IRISES,
-                    landmark_drawing_spec=None,
-                    connection_drawing_spec=self._iris_style,
+            if self._draw_iris:
+                iris_styles = _mp_drawing_styles.get_default_face_mesh_iris_connections_style()
+                iris_conns = (
+                    FaceLandmarksConnections.FACE_LANDMARKS_LEFT_IRIS
+                    + FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_IRIS
                 )
+                for conn in iris_conns:
+                    start_lm = face_landmarks[conn.start]
+                    end_lm   = face_landmarks[conn.end]
+                    style = iris_styles.get((conn.start, conn.end),
+                             iris_styles.get((conn.end, conn.start)))
+                    if style:
+                        cv2.line(frame,
+                                 (int(start_lm.x * w_img), int(start_lm.y * h_img)),
+                                 (int(end_lm.x * w_img), int(end_lm.y * h_img)),
+                                 style.color, style.thickness, cv2.LINE_AA)
 
         if emotion_label:
             label_text, color_bgr = EMOTION_DISPLAY.get(
@@ -121,8 +152,8 @@ class FaceMeshDrawer:
         return frame
 
     def close(self):
-        if self._face_mesh is not None:
-            self._face_mesh.close()
+        if self._landmarker is not None:
+            self._landmarker.close()
 
 class FaceEmotionThread(threading.Thread):
     """

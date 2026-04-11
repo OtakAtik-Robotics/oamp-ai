@@ -1,13 +1,4 @@
-"""
-hands.py — MediaPipe hand tracking + rich skeleton visualization + data extraction
-
-Changes:
-- Skeleton dengan warna berbeda per jari (thumb=oranye, index=hijau, dst)
-- Titik landmark lebih besar, ujung jari diberi label T/I/M/R/P
-- draw_style: "rich" (default) atau "simple" (default MediaPipe)
-- Data extraction untuk riset tetap ada
-"""
-
+import os
 import time
 import math
 from dataclasses import dataclass, asdict
@@ -22,12 +13,22 @@ except ImportError:
 
 try:
     import mediapipe as mp
-    _mp_solutions = getattr(mp, "solutions", None)
-    if _mp_solutions is None:
-        from mediapipe.python import solutions as _mp_solutions
-except ImportError:
-    mp = None
-    _mp_solutions = None
+    from mediapipe.tasks.python import BaseOptions
+    from mediapipe.tasks.python.vision import (
+        HandLandmarker,
+        HandLandmarkerOptions,
+        HandLandmarksConnections,
+        RunningMode,
+    )
+    _HAS_MP = True
+except Exception as e:
+    print(f">>> [DEBUG] Gagal load MediaPipe: {e}")
+    _HAS_MP = False
+
+
+# ── Model path ──────────────────────────────────────────────────────
+_MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "models", "weights")
+_HAND_MODEL = os.path.normpath(os.path.join(_MODEL_DIR, "hand_landmarker.task"))
 
 
 FINGER_COLORS = {
@@ -70,73 +71,83 @@ class HandTracker:
         draw_style: str = "rich",
         session_start: Optional[float] = None,
     ):
-        self.available   = _mp_solutions is not None
         self.draw_style  = draw_style
         self._session_start = session_start or time.time()
         self._movement_buffer: List[HandMovementSample] = []
         self._last_pos: Optional[Tuple[float,float]] = None
         self._last_ts:  Optional[float] = None
 
-        if not self.available:
-            print(">>> MediaPipe tidak tersedia.")
-            self._hands = None
+        if not _HAS_MP or not os.path.isfile(_HAND_MODEL):
+            print(f">>> MediaPipe tidak tersedia atau model tidak ditemukan: {_HAND_MODEL}")
+            self.available = False
+            self._landmarker = None
             return
 
-        self._mp_hands = _mp_solutions.hands
-        self._drawing  = _mp_solutions.drawing_utils
-        self._hands    = self._mp_hands.Hands(
-            min_detection_confidence=0.6,
-            min_tracking_confidence=0.5,
-            max_num_hands=max_num_hands,
-        )
-        self._lm_style   = self._drawing.DrawingSpec(color=(0,255,0), thickness=3, circle_radius=4)
-        self._conn_style = self._drawing.DrawingSpec(color=(0,200,0), thickness=2)
+        try:
+            options = HandLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=_HAND_MODEL),
+                running_mode=RunningMode.IMAGE,
+                min_hand_detection_confidence=0.6,
+                min_hand_presence_confidence=0.5,
+                min_tracking_confidence=0.5,
+                num_hands=max_num_hands,
+            )
+            self._landmarker = HandLandmarker.create_from_options(options)
+            self.available = True
+        except Exception as e:
+            print(f">>> [DEBUG] Gagal inisialisasi HandLandmarker: {e}")
+            self.available = False
+            self._landmarker = None
 
     def _px(self, lmk, w, h):
         return int(lmk.x * w), int(lmk.y * h)
 
-    def _draw_rich(self, frame, hand_landmarks):
+    def _draw_rich(self, frame, landmarks):
         if cv2 is None:
             return
         h, w = frame.shape[:2]
-        lm = hand_landmarks.landmark
 
         # Telapak
         for a, b in PALM_CONNECTIONS:
-            cv2.line(frame, self._px(lm[a],w,h), self._px(lm[b],w,h),
+            cv2.line(frame, self._px(landmarks[a],w,h), self._px(landmarks[b],w,h),
                     FINGER_COLORS["palm"], 2, cv2.LINE_AA)
 
         # Jari
         for finger, indices in FINGER_LANDMARKS.items():
             color = FINGER_COLORS[finger]
-            cv2.line(frame, self._px(lm[0],w,h), self._px(lm[indices[0]],w,h),
+            cv2.line(frame, self._px(landmarks[0],w,h), self._px(landmarks[indices[0]],w,h),
                     color, 2, cv2.LINE_AA)
             for i in range(len(indices)-1):
                 cv2.line(frame,
-                        self._px(lm[indices[i]],  w,h),
-                        self._px(lm[indices[i+1]],w,h),
+                        self._px(landmarks[indices[i]],  w,h),
+                        self._px(landmarks[indices[i+1]],w,h),
                         color, 2, cv2.LINE_AA)
 
-        for i, lmk in enumerate(lm):
+        for i, lmk in enumerate(landmarks):
             px = self._px(lmk, w, h)
             r  = 7 if i in TIP_LABELS else 4
             cv2.circle(frame, px, r+2, (255,255,255), -1, cv2.LINE_AA)
             cv2.circle(frame, px, r,   (0, 180, 0),   -1, cv2.LINE_AA)
 
         for tip_idx, lbl in TIP_LABELS.items():
-            px = self._px(lm[tip_idx], w, h)
+            px = self._px(landmarks[tip_idx], w, h)
             cv2.putText(frame, lbl, (px[0]+6, px[1]-6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                         (255,255,255), 1, cv2.LINE_AA)
 
     def process_and_draw(self, frame):
-        if not self.available or self._hands is None:
+        if not self.available or self._landmarker is None:
             return frame, []
 
-        results = self._hands.process(frame)
+        if cv2 is None:
+            return frame, []
+
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        results = self._landmarker.detect(mp_image)
         samples: List[HandMovementSample] = []
 
-        if not results.multi_hand_landmarks:
+        if not results.hand_landmarks:
             self._last_pos = None
             self._last_ts  = None
             return frame, []
@@ -144,17 +155,25 @@ class HandTracker:
         now   = time.time()
         ts_ms = int((now - self._session_start) * 1000)
 
-        for hand_landmarks in results.multi_hand_landmarks:
+        for hand_landmarks in results.hand_landmarks:
             if self.draw_style == "rich":
                 self._draw_rich(frame, hand_landmarks)
             else:
-                self._drawing.draw_landmarks(
-                    frame, hand_landmarks,
-                    self._mp_hands.HAND_CONNECTIONS,
-                    self._lm_style, self._conn_style,
-                )
+                connections = HandLandmarksConnections.HAND_CONNECTIONS
+                for conn in connections:
+                    start = hand_landmarks[conn.start]
+                    end   = hand_landmarks[conn.end]
+                    h_img, w_img = frame.shape[:2]
+                    cv2.line(frame,
+                             self._px(start, w_img, h_img),
+                             self._px(end, w_img, h_img),
+                             (0, 200, 0), 2, cv2.LINE_AA)
+                for lmk in hand_landmarks:
+                    h_img, w_img = frame.shape[:2]
+                    cv2.circle(frame, self._px(lmk, w_img, h_img),
+                               3, (0, 255, 0), -1, cv2.LINE_AA)
 
-            wrist = hand_landmarks.landmark[0]
+            wrist = hand_landmarks[0]
             cx, cy = wrist.x, wrist.y
             kecepatan = 0.0
             if self._last_pos is not None and self._last_ts is not None:
@@ -184,5 +203,5 @@ class HandTracker:
         return data
 
     def close(self):
-        if self._hands is not None:
-            self._hands.close()
+        if self._landmarker is not None:
+            self._landmarker.close()

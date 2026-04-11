@@ -67,9 +67,6 @@ class VoiceStatus:
 
 class VoiceGreeter:
     """
-    Ucapkan sapaan ke anak menggunakan gTTS + sounddevice.
-    Fire-and-forget, berjalan di thread terpisah.
-
     Usage:
         greeter = VoiceGreeter()
         greeter.greet("Budi")
@@ -147,7 +144,7 @@ class VoiceGreeter:
 class Wav2Vec2RecogThread(threading.Thread):
     def __init__(
         self,
-        model_name: str = "indonesian-nlp/wav2vec2-large-xlsr-indonesian",
+        model_name: str = "indonesian-nlp/wav2vec2-indonesian-javanese-sundanese",
         vosk_model_path: Optional[str] = None,
         on_command: Optional[Callable[[VoiceEvent], None]] = None,
     ):
@@ -248,42 +245,46 @@ class Wav2Vec2RecogThread(threading.Thread):
 
 
     def run(self):
-        if not self.is_available or not _HAS_SD:
-            self.status.update(VoiceStatus.ERROR, raw="Tidak tersedia")
+        if not self.is_available:
             return
-
-        self.status.update(VoiceStatus.LISTENING)
-
-        if self._mode == "vosk":
-            self._run_vosk()
-            return
-
-        try:
-            with sd.InputStream(
-                samplerate=SAMPLERATE, channels=1,
-                dtype="float32", blocksize=4000,
-                callback=self._audio_cb,
-            ):
-                print(">>> Mic aktif (Wav2Vec2 mode)...")
-                while self.running:
-                    time.sleep(CHUNK_SEC)
-                    with self._audio_lock:
-                        if len(self.audio_buffer) < SAMPLERATE // 2:
-                            continue
-                        chunk = self.audio_buffer.copy()
-                        self.audio_buffer = np.array([], dtype=np.float32)
-
-                    text = self._transcribe_wav2vec2(chunk)
-                    if not text:
-                        continue
-                    print(f"[Mic] Wav2Vec2: '{text}'")
-                    cmd = self._parse(text)
-                    if cmd:
-                        self._emit(text, cmd)
-
-        except Exception as e:
-            self.status.update(VoiceStatus.ERROR, raw=str(e))
-            print(f">>> Voice thread error: {e}")
+            
+        samplerate = 16000
+        duration = 2.0
+        
+        VOLUME_THRESHOLD = 0.015 
+        
+        while self.running:
+            try:
+                audio_data = self.sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype='float32')
+                self.sd.wait()
+                
+                rms_volume = self.np.sqrt(self.np.mean(audio_data**2))
+                
+                if rms_volume < VOLUME_THRESHOLD:
+                    continue
+                
+                input_values = self.processor(
+                    audio_data.squeeze(), 
+                    sampling_rate=samplerate, 
+                    return_tensors="pt"
+                ).input_values
+                
+                input_values = input_values.to(self.device)
+                
+                with self.torch.no_grad():
+                    logits = self.model(input_values).logits
+                
+                predicted_ids = self.torch.argmax(logits, dim=-1)
+                transcription = self.processor.batch_decode(predicted_ids)[0].lower()
+                
+                if transcription.strip():
+                    print(f"[Mic] (Vol: {rms_volume:.3f}) Mendengar: {transcription}")
+                
+                if "mulai" in transcription or "mlai" in transcription:
+                    self.command_queue.put("mulai")
+                    
+            except Exception as e:
+                time.sleep(0.5)
 
     def _run_vosk(self):
         def _cb(indata, frames, t, status):
