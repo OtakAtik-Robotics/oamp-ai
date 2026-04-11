@@ -61,6 +61,9 @@ class GameWindow(customtkinter.CTk):
         self.max_level     = min(max(int(os.getenv("MAX_LEVEL", "8")), 1), 8)
         self.yolo_skip     = int(os.getenv("YOLO_SKIP_FRAMES",      "2"))
         self.mp_skip       = int(os.getenv("MEDIAPIPE_SKIP_FRAMES",  "2"))
+        self.enable_face   = os.getenv("ENABLE_FACE_CAMERA", "true").lower() == "true"
+        self.enable_voice  = os.getenv("ENABLE_VOICE",        "true").lower() == "true"
+        self.voice_model   = os.getenv("VOICE_MODEL", "indonesian-nlp/wav2vec2-large-xlsr-indonesian")
         # Dual camera indices
         self.cam_game_idx  = int(os.getenv("CAMERA_GAME_INDEX",  os.getenv("CAMERA_INDEX", "0")))
         self.cam_face_idx  = int(os.getenv("CAMERA_FACE_INDEX",  "1"))
@@ -160,38 +163,53 @@ class GameWindow(customtkinter.CTk):
         self._cap_game.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         self._cap_game.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-        # Face camera
-        self._cap_face = cv2.VideoCapture(self.cam_face_idx)
-        self._cap_face.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-        self._cap_face.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self._face_cam_ok = self._cap_face.isOpened()
-        if not self._face_cam_ok:
-            print(f">>> Kamera wajah (index {self.cam_face_idx}) tidak tersedia.")
+        # Face camera (hanya jika di-enable)
+        if self.enable_face:
+            self._cap_face = cv2.VideoCapture(self.cam_face_idx)
+            self._cap_face.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+            self._cap_face.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self._face_cam_ok = self._cap_face.isOpened()
+            if not self._face_cam_ok:
+                print(f">>> Kamera wajah (index {self.cam_face_idx}) tidak tersedia.")
+        else:
+            self._cap_face = None
+            self._face_cam_ok = False
+            print(">>> Face camera disabled via ENABLE_FACE_CAMERA=false")
 
         # Hand tracker
         self._hand_tracker = HandTracker(draw_style="rich")
 
-        # Face mesh drawer (untuk kamera wajah)
-        self._face_mesh = FaceMeshDrawer(
-            draw_tesselation=True, draw_contours=True, draw_iris=True,
-        )
+        # Face mesh drawer (hanya jika face camera aktif)
+        if self._face_cam_ok:
+            self._face_mesh = FaceMeshDrawer(
+                draw_tesselation=True, draw_contours=True, draw_iris=True,
+            )
+        else:
+            self._face_mesh = None
 
-        # Face emotion thread
-        self._face_thread = FaceEmotionThread(smooth_window=5)
-        self._face_thread.start()
+        # Face emotion thread (hanya jika face camera aktif)
+        if self._face_cam_ok:
+            self._face_thread = FaceEmotionThread(smooth_window=5)
+            self._face_thread.start()
+        else:
+            self._face_thread = None
 
-        # Voice
-        model_voice = os.path.join(self.base_dir, "models", "vosk-model-small-id")
-        self._voice = VoiceCommandThread(
-            model_name="indonesian-nlp/wav2vec2-large-xlsr-indonesian",
-            vosk_model_path=model_voice,
-            on_command=self._on_voice_command,
-        )
-        self._voice.start()
-        self._status_bar.voice.set_listening(self._voice.is_available)
+        # Voice (hanya jika di-enable)
+        if self.enable_voice:
+            model_voice = os.path.join(self.base_dir, "models", "vosk-model-small-id")
+            self._voice = VoiceCommandThread(
+                model_name=self.voice_model,
+                vosk_model_path=model_voice,
+                on_command=self._on_voice_command,
+            )
+            self._voice.start()
+            self._status_bar.voice.set_listening(self._voice.is_available)
+        else:
+            self._voice = None
+            print(">>> Voice disabled via ENABLE_VOICE=false")
 
         # Greeter
-        self._greeter = VoiceGreeter()
+        self._greeter = VoiceGreeter() if self.enable_voice else None
 
         # YOLO
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -236,7 +254,8 @@ class GameWindow(customtkinter.CTk):
 
     def _greet_player(self):
         name = self.user_data.get("name", "Adik")
-        self._greeter.greet(name)
+        if self._greeter:
+            self._greeter.greet(name)
 
 
     def _tick(self):
@@ -259,7 +278,8 @@ class GameWindow(customtkinter.CTk):
 
     def _on_start(self):
         self._start_btn.grid_remove()
-        self._face_thread.reset_session()
+        if self._face_thread:
+            self._face_thread.reset_session()
         self._hand_tracker.reset_session()
         self._show_level_btn()
         play_audio(os.path.join(self.base_dir,"assets","audio","hitung_mundur.wav"))
@@ -325,7 +345,8 @@ class GameWindow(customtkinter.CTk):
         self._timer_all.append(round(elapsed,2))
         self._cog_ages.append(estimate_cognitive_age(elapsed))
         play_feedback_audio(elapsed)
-        self._greeter.say_feedback(elapsed)
+        if self._greeter:
+            self._greeter.say_feedback(elapsed)
         self._status_bar.set_attempts(self._evaluator.attempt_count)
 
         if self._current_q >= self.max_level:
@@ -334,7 +355,8 @@ class GameWindow(customtkinter.CTk):
         nxt = self._current_q + 1
         audio = os.path.join(self.base_dir,"assets","audio",f"lanjut_lvl{nxt}.wav")
         if os.path.exists(audio): play_audio(audio)
-        self._greeter.say_level(nxt)
+        if self._greeter:
+            self._greeter.say_level(nxt)
         self._current_q = nxt
         self._task_flags[self._current_q] = True
         self._next_level()
@@ -351,14 +373,15 @@ class GameWindow(customtkinter.CTk):
         age  = self.user_data.get("age", 0)
         cog  = int(sum(self._cog_ages)/len(self._cog_ages)) if self._cog_ages else age
         fit  = 100 if cog <= age else max(0,100-(cog-age))
-        emo  = self._face_thread.get_session_summary()
+        emo  = self._face_thread.get_session_summary() if self._face_thread else None
         hand = self._hand_tracker.flush_buffer()
 
         print(f"=== HASIL === Avg: {avg:.2f}s | CogAge: {cog} | Fitness: {fit}%")
         if emo: print(f"Emosi dominan: {emo.get('dominant')}")
 
         play_audio(os.path.join(self.base_dir,"assets","audio","selesai.wav"))
-        self._greeter.say_finish()
+        if self._greeter:
+            self._greeter.say_finish()
 
         if self.server_client and self.session_id:
             self.server_client.end_session(SessionResult(
@@ -431,20 +454,22 @@ class GameWindow(customtkinter.CTk):
                 if self._cam_panel:
                     self._cam_panel.update_game_frame(Image.fromarray(frame_rgb))
 
-        if self._face_cam_ok and self._cap_face.isOpened():
+        if self._face_cam_ok and self._cap_face and self._cap_face.isOpened():
             ret_f, frame_f = self._cap_face.read()
             if ret_f:
                 frame_f_rgb = cv2.cvtColor(frame_f, cv2.COLOR_BGR2RGB)
 
-                if self._frame_count % 15 == 0:
+                if self._face_thread and self._frame_count % 15 == 0:
                     self._face_thread.submit_frame(frame_f_rgb.copy())
 
-                emo = self._face_thread.get_emotion()
-                if emo:
-                    self._cur_emotion = emo
-                    self._status_bar.emotion.set_emotion(emo)
+                if self._face_thread:
+                    emo = self._face_thread.get_emotion()
+                    if emo:
+                        self._cur_emotion = emo
+                        self._status_bar.emotion.set_emotion(emo)
 
-                frame_f_rgb = self._face_mesh.draw(frame_f_rgb, self._cur_emotion)
+                if self._face_mesh:
+                    frame_f_rgb = self._face_mesh.draw(frame_f_rgb, self._cur_emotion)
 
                 if self._cam_panel:
                     self._cam_panel.update_face_frame(Image.fromarray(frame_f_rgb))

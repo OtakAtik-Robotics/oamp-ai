@@ -247,43 +247,45 @@ class Wav2Vec2RecogThread(threading.Thread):
     def run(self):
         if not self.is_available:
             return
-            
-        samplerate = 16000
-        duration = 2.0
-        
-        VOLUME_THRESHOLD = 0.015 
-        
+
+        if self._mode == "vosk":
+            self._run_vosk()
+            return
+
+        import sounddevice as sd
+
+        VOLUME_THRESHOLD = 0.04
+
         while self.running:
             try:
-                audio_data = self.sd.rec(int(samplerate * duration), samplerate=samplerate, channels=1, dtype='float32')
-                self.sd.wait()
-                
-                rms_volume = self.np.sqrt(self.np.mean(audio_data**2))
-                
-                if rms_volume < VOLUME_THRESHOLD:
+                audio_data = sd.rec(
+                    int(SAMPLERATE * CHUNK_SEC),
+                    samplerate=SAMPLERATE, channels=1, dtype="float32",
+                )
+                sd.wait()
+
+                rms = np.sqrt(np.mean(audio_data ** 2))
+
+                if rms < VOLUME_THRESHOLD:
                     continue
-                
-                input_values = self.processor(
-                    audio_data.squeeze(), 
-                    sampling_rate=samplerate, 
-                    return_tensors="pt"
-                ).input_values
-                
-                input_values = input_values.to(self.device)
-                
-                with self.torch.no_grad():
-                    logits = self.model(input_values).logits
-                
-                predicted_ids = self.torch.argmax(logits, dim=-1)
-                transcription = self.processor.batch_decode(predicted_ids)[0].lower()
-                
-                if transcription.strip():
-                    print(f"[Mic] (Vol: {rms_volume:.3f}) Mendengar: {transcription}")
-                
-                if "mulai" in transcription or "mlai" in transcription:
-                    self.command_queue.put("mulai")
-                    
+
+                self.status.update(VoiceStatus.LISTENING)
+
+                text = self._transcribe_wav2vec2(audio_data.squeeze())
+
+                if not text:
+                    self.status.update(VoiceStatus.IDLE)
+                    continue
+
+                print(f"[Mic] (Vol: {rms:.3f}) Mendengar: {text}")
+                cmd = self._parse(text)
+                if cmd:
+                    self._emit(text, cmd)
+                else:
+                    self.status.update(VoiceStatus.IDLE)
+
             except Exception as e:
+                print(f"[Voice] Error: {e}")
                 time.sleep(0.5)
 
     def _run_vosk(self):
