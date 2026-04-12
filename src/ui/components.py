@@ -169,7 +169,6 @@ class DualCameraPanel(customtkinter.CTkFrame):
         self._game_cam.configure(image=tk_img)
 
     def update_face_frame(self, pil_image: Image.Image):
-        """Update frame kamera wajah."""
         w = self._face_cam.winfo_width()
         h = self._face_cam.winfo_height()
         if w > 10 and h > 10:

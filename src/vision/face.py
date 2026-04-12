@@ -29,8 +29,6 @@ except Exception as e:
     print(f">>> [DEBUG] Gagal load MediaPipe: {e}")
     _HAS_MP = False
 
-
-# ── Model path ──────────────────────────────────────────────────────
 _MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "models", "weights")
 _FACE_MODEL = os.path.normpath(os.path.join(_MODEL_DIR, "face_landmarker.task"))
 
@@ -156,11 +154,6 @@ class FaceMeshDrawer:
             self._landmarker.close()
 
 class FaceEmotionThread(threading.Thread):
-    """
-    Background thread deteksi emosi via DeepFace.
-    Berjalan terpisah agar tidak block main loop.
-    """
-
     def __init__(self, smooth_window: int = 5):
         super().__init__(daemon=True, name="FaceEmotion")
         self.frame_queue:  Queue = Queue(maxsize=1)

@@ -1,131 +1,91 @@
-import json
-import sqlite3
-import threading
-import time
-import uuid
 import logging
-from pathlib import Path
-from typing import Optional, List
-from dataclasses import dataclass
+import threading
+from typing import Optional
+import requests
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 logger = logging.getLogger("api_client")
-
-try:
-    import requests
-    _HAS_REQUESTS = True
-except ImportError:
-    _HAS_REQUESTS = False
-    logger.warning("requests tidak terinstall. Jalankan: pip install requests")
-
-
-@dataclass
-class SessionResult:
-    session_id: str
-    child_id: str
-    robot_id: str
-    waktu_solve: float
-    skor: int
-    jumlah_percobaan: int
-    status: str = "completed"      # completed | skipped
-    hand_logs: Optional[list] = None
-
 
 class ServerClient:
     """
-    Client HTTP ke server Go.
+    HTTP client for the OAMP Go backend server.
 
-    Args:
-        base_url:       e.g. "http://192.168.1.100:8080"
-        robot_id:       UUID robot ini (didapat saat register ke server)
-        db_path:        Path file SQLite lokal untuk buffer offline
-        sync_interval:  Detik antar upaya sync data offline (default 15)
-        timeout:        HTTP request timeout detik (default 3)
+    Reads BASE_URL from .env (BACKEND_API_URL).
+    Default: http://localhost:8080/api/v1
+
+    Typical usage flow:
+        client = ServerClient()
+
+        # 1. Robot taps RFID -> authenticate child
+        child = client.authenticate("RFID-ABC123")
+        if not child:
+            # unknown card, skip
+            return
+
+        # 2. Calibrate robot height using child["height"]
+        robot.set_height(child["height"])
+
+        # 3. Child plays the game...
+        # ...collect game data, expressions, datasets during play...
+
+        # 4. Build and submit session payload
+        payload = client.build_session_payload(
+            participant_id=child["id"],
+            game_data={
+                "mode": "normal",
+                "level_reached": 5,
+                "total_time": 23.4,
+                "cognitive_age": 10,
+                "visuo_spatial_fit": 0.87,
+                "dexterity_score": 92.5,
+            },
+            expressions=face_expression_list,
+            datasets=dataset_capture_list,
+        )
+        session_id = client.submit_game_session(payload)
+
+        # 5. Optionally send additional face logs in background
+        if session_id:
+            client.submit_face_logs(session_id, extra_face_logs)
     """
 
     def __init__(
         self,
-        base_url: str,
-        robot_id: str,
-        db_path: str = "local_buffer.db",
-        sync_interval: int = 15,
-        timeout: int = 3,
+        base_url: Optional[str] = None,
+        timeout: float = 3.0,
     ):
-        self.base_url = base_url.rstrip("/")
-        self.robot_id = robot_id
+        self.base_url = (
+            base_url
+            or os.getenv("BACKEND_API_URL", "http://localhost:8080/api/v1")
+        ).rstrip("/")
         self.timeout = timeout
+        self._session = requests.Session()
         self._online = False
+        logger.info("ServerClient initialized — server: %s", self.base_url)
 
-        # Setup SQLite buffer
-        self._db_path = Path(db_path)
-        self._init_local_db()
-
-        # Background sync thread
-        self._sync_interval = sync_interval
-        self._sync_thread = threading.Thread(
-            target=self._sync_worker,
-            daemon=True,
-            name="OfflineSync",
-        )
-        self._sync_thread.start()
-        logger.info(f"ServerClient initialized. Server: {self.base_url}")
-
-    def _init_local_db(self):
-        """Buat tabel buffer kalau belum ada."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS session_buffer (
-                    id          TEXT PRIMARY KEY,
-                    payload     TEXT NOT NULL,
-                    created_at  REAL NOT NULL,
-                    synced      INTEGER NOT NULL DEFAULT 0
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS heartbeat_buffer (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    payload     TEXT NOT NULL,
-                    created_at  REAL NOT NULL,
-                    synced      INTEGER NOT NULL DEFAULT 0
-                )
-            """)
-            conn.commit()
-
-    def _buffer_session(self, result: SessionResult):
-        payload = {
-            "session_id":       result.session_id,
-            "waktu_solve":      result.waktu_solve,
-            "skor":             result.skor,
-            "jumlah_percobaan": result.jumlah_percobaan,
-            "status":           result.status,
-        }
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO session_buffer (id, payload, created_at, synced) VALUES (?,?,?,0)",
-                (result.session_id, json.dumps(payload), time.time()),
+    def _get(self, path: str) -> Optional[dict]:
+        try:
+            r = self._session.get(
+                f"{self.base_url}{path}",
+                timeout=self.timeout,
             )
-            conn.commit()
-        logger.info(f"📦 Buffered session {result.session_id} ke SQLite")
-
-    def _get_unsynced_sessions(self) -> List[dict]:
-        with sqlite3.connect(self._db_path) as conn:
-            rows = conn.execute(
-                "SELECT id, payload FROM session_buffer WHERE synced=0 ORDER BY created_at"
-            ).fetchall()
-        return [{"id": r[0], "payload": json.loads(r[1])} for r in rows]
-
-    def _mark_synced(self, session_id: str):
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute(
-                "UPDATE session_buffer SET synced=1 WHERE id=?",
-                (session_id,),
-            )
-            conn.commit()
+            self._online = True
+            r.raise_for_status()
+            return r.json()
+        except requests.Timeout:
+            logger.error("GET %s timed out", path)
+        except requests.ConnectionError:
+            self._online = False
+            logger.error("Server unreachable: GET %s", path)
+        except requests.RequestException as e:
+            logger.error("GET %s error: %s", path, e)
+        return None
 
     def _post(self, path: str, data: dict) -> Optional[dict]:
-        if not _HAS_REQUESTS:
-            return None
         try:
-            r = requests.post(
+            r = self._session.post(
                 f"{self.base_url}{path}",
                 json=data,
                 timeout=self.timeout,
@@ -133,117 +93,113 @@ class ServerClient:
             self._online = True
             r.raise_for_status()
             return r.json()
-        except requests.exceptions.ConnectionError:
+        except requests.Timeout:
+            logger.error("POST %s timed out", path)
+        except requests.ConnectionError:
             self._online = False
-            logger.warning(f"⚠️  Server tidak terjangkau: {self.base_url}{path}")
-            return None
-        except Exception as e:
-            logger.error(f"HTTP error {path}: {e}")
-            return None
-
-    def _get(self, path: str) -> Optional[dict]:
-        if not _HAS_REQUESTS:
-            return None
-        try:
-            r = requests.get(f"{self.base_url}{path}", timeout=self.timeout)
-            self._online = True
-            r.raise_for_status()
-            return r.json()
-        except requests.exceptions.ConnectionError:
-            self._online = False
-            return None
-        except Exception as e:
-            logger.error(f"HTTP GET error {path}: {e}")
-            return None
-
-    def get_child_by_rfid(self, rfid_tag: str) -> Optional[dict]:
-        result = self._get(f"/child/rfid/{rfid_tag}")
-        if result and result.get("success"):
-            return result.get("data")
+            logger.error("Server unreachable: POST %s", path)
+        except requests.RequestException as e:
+            logger.error("POST %s error: %s", path, e)
         return None
-
-    def get_child_by_qr(self, qr_code: str) -> Optional[dict]:
-        result = self._get(f"/child/qr/{qr_code}")
-        if result and result.get("success"):
-            return result.get("data")
-        return None
-
-    def get_child_by_nomor(self, nomor: str) -> Optional[dict]:
-        result = self._get(f"/child/nomor/{nomor}")
-        if result and result.get("success"):
-            return result.get("data")
-        return None
-
-    def start_session(self, child_id: str, level: int, variant: str) -> Optional[str]:
-        result = self._post("/session/start", {
-            "child_id": child_id,
-            "robot_id": self.robot_id,
-            "level":    level,
-            "variant":  variant,
-        })
-        if result and result.get("success"):
-            return result["data"]["session_id"]
-
-        local_id = str(uuid.uuid4())
-        logger.info(f"📦 Session dimulai offline, ID lokal: {local_id}")
-        return local_id
-
-    def end_session(self, result: SessionResult) -> bool:
-        payload = {
-            "session_id":       result.session_id,
-            "waktu_solve":      result.waktu_solve,
-            "skor":             result.skor,
-            "jumlah_percobaan": result.jumlah_percobaan,
-            "status":           result.status,
-        }
-        response = self._post("/session/end", payload)
-        if response and response.get("success"):
-            logger.info(f"✅ Session {result.session_id} tersimpan ke server")
-
-            if result.hand_logs:
-                self._post("/session/hand-logs", {
-                    "session_id": result.session_id,
-                    "logs":       result.hand_logs,
-                })
-            return True
-
-        self._buffer_session(result)
-        return False
-
-    def send_heartbeat(self, status: str, baterai_persen: int = 100):
-        self._post("/robot/heartbeat", {
-            "robot_id":       self.robot_id,
-            "status":         status,
-            "baterai_persen": baterai_persen,
-        })
 
     @property
     def is_online(self) -> bool:
         return self._online
 
+    def authenticate(self, uid: str) -> Optional[dict]:
+        """
+        GET /api/v1/robot/auth/{uid}
+        Returns participant dict (includes 'id', 'name', 'height', etc.)
+        """
 
-    def _sync_worker(self):
-        while True:
-            time.sleep(self._sync_interval)
-            try:
-                self._do_sync()
-            except Exception as e:
-                logger.error(f"Sync error: {e}")
+        body = self._get(f"/robot/auth/{uid}")
+        if body and body.get("status") == "success" and body.get("data"):
+            data = body["data"]
+            logger.info(
+                "Authenticated: %s (id=%s, height=%.1f cm)",
+                data.get("name"),
+                data.get("id"),
+                data.get("height", 0),
+            )
+            return data
 
-    def _do_sync(self):
-        pending = self._get_unsynced_sessions()
-        if not pending:
+        logger.warning("Authentication failed for UID %s", uid)
+        return None
+    def build_session_payload(
+        self,
+        participant_id: int,
+        game_data: dict,
+        expressions: list = None,
+        datasets: list = None,
+    ) -> dict:
+        """
+        Build the full payload dict for submit_game_session().
+
+        Args:
+            participant_id: from authenticate()["id"]
+            game_data:      dict with keys like mode, level_reached,
+                            total_time, cognitive_age, visuo_spatial_fit,
+                            dexterity_score
+            expressions:    list of {level, dominant_emotion, timestamp}
+            datasets:       list of {camera_source, image_path}
+
+        Returns:
+            Ready-to-send payload dict.
+        """
+
+        return {
+            "session": {
+                "participant_id": participant_id,
+                **game_data,
+            },
+            "expressions": expressions or [],
+            "datasets": datasets or [],
+        }
+    def submit_game_session(self, data: dict) -> Optional[int]:
+        """
+        POST /api/v1/robot/sessions
+
+        Accepts the payload from build_session_payload().
+        Returns session_id (int) from the server, or None on failure.
+        """
+        body = self._post("/robot/sessions", data)
+        if body and body.get("status") == "success" and body.get("data"):
+            session_id = body["data"].get("session_id")
+            logger.info("Session submitted — id=%s", session_id)
+            return session_id
+
+        logger.error("submit_game_session failed")
+        return None
+
+    def submit_face_logs(self, session_id: int, logs: list) -> None:
+        """
+        POST /api/v1/robot/logs/face
+
+        Sends batch face expression logs recorded during gameplay.
+        Runs in a background daemon thread so it never blocks the
+        main game loop or UI.
+
+        Args:
+            session_id: ID of the game session (from submit_game_session).
+            logs:       List of dicts with keys: level, dominant_emotion, timestamp.
+        """
+        if not logs:
             return
 
-        logger.info(f"🔄 Syncing {len(pending)} sesi offline...")
-        payloads = [row["payload"] for row in pending]
+        def _send():
+            body = self._post("/robot/logs/face", {
+                "session_id": session_id,
+                "logs": logs,
+            })
+            if body and body.get("status") == "success":
+                count = body.get("data", {}).get("count", "?")
+                logger.info(
+                    "Face logs sent — session %d, count=%s",
+                    session_id,
+                    count,
+                )
+            else:
+                logger.error("submit_face_logs failed for session %d", session_id)
 
-        response = self._post("/session/sync-buffer", payloads)
-        if not response:
-            return
-
-        for row in pending:
-            self._mark_synced(row["id"])
-
-        synced = response.get("data", {}).get("synced", 0)
-        logger.info(f"✅ Sync selesai: {synced}/{len(pending)} berhasil")
+        thread = threading.Thread(target=_send, daemon=True)
+        thread.start()

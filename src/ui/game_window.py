@@ -8,7 +8,7 @@ import customtkinter
 from PIL import Image, ImageTk
 from typing import Optional
 
-from src.api_client import ServerClient, SessionResult
+from src.api_client import ServerClient
 from src.utils.audio import play_audio, play_feedback_audio
 from src.utils.math_eval import estimate_cognitive_age
 from src.ui.components import (
@@ -50,7 +50,6 @@ class GameWindow(customtkinter.CTk):
         self._setup_ai()
         self._preload_images()
 
-        # Sapa anak setelah UI siap
         self.after(800, self._greet_player)
 
     def _setup_env(self):
@@ -83,12 +82,10 @@ class GameWindow(customtkinter.CTk):
     def _setup_layout(self):
         self._main = customtkinter.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
         self._main.grid(row=0, column=0, sticky="nsew")
-        # Kiri: soal + level + timer | Kanan: 2 kamera
         self._main.grid_columnconfigure(0, weight=2)
         self._main.grid_columnconfigure(1, weight=3)
         self._main.grid_rowconfigure(0, weight=1)
 
-        # ── Left panel ────────────────────────────────────────────
         self._left = customtkinter.CTkFrame(self._main, fg_color=BG_CARD, corner_radius=12)
         self._left.grid(row=0, column=0, sticky="nsew", padx=(12,6), pady=12)
         self._left.grid_columnconfigure(1, weight=1)
@@ -123,14 +120,12 @@ class GameWindow(customtkinter.CTk):
         )
         self._start_btn.grid(row=2, column=1, padx=(0,12), pady=(0,8), sticky="ew")
 
-        # ── Right panel: DualCameraPanel ─────────────────────────
         if not self.hide_camera:
             self._cam_panel = DualCameraPanel(self._main)
             self._cam_panel.grid(row=0, column=1, sticky="nsew", padx=(6,12), pady=12)
         else:
             self._cam_panel = None
 
-        # ── Status bar ────────────────────────────────────────────
         self._status_bar = StatusBar(self)
         self._status_bar.grid(row=1, column=0, sticky="ew")
 
@@ -277,22 +272,13 @@ class GameWindow(customtkinter.CTk):
         self._timer.reset()
 
     def _on_start(self):
-        print(">>> [DEBUG] _on_start called")
         self._start_btn.grid_remove()
         if self._face_thread:
             self._face_thread.reset_session()
         self._hand_tracker.reset_session()
         self._show_level_btn()
-        print(">>> [DEBUG] playing audio...")
         play_audio(os.path.join(self.base_dir,"assets","audio","hitung_mundur.wav"))
-        print(">>> [DEBUG] audio done, calling _next_level")
-        if self.server_client:
-            self.session_id = self.server_client.start_session(
-                child_id=self.user_data.get("server_id",""),
-                level=self._current_q, variant="1a",
-            )
         self._next_level()
-        print(">>> [DEBUG] _next_level done, starting _stream")
         self._stream()
 
     def _show_level_btn(self):
@@ -386,15 +372,38 @@ class GameWindow(customtkinter.CTk):
         if self._greeter:
             self._greeter.say_finish()
 
-        if self.server_client and self.session_id:
-            self.server_client.end_session(SessionResult(
-                session_id=self.session_id,
-                child_id=self.user_data.get("server_id",""),
-                robot_id=self.server_client.robot_id,
-                waktu_solve=avg, skor=fit,
-                jumlah_percobaan=self._evaluator.attempt_count,
-                status="completed", hand_logs=hand,
-            ))
+        if self.server_client and self.server_client.is_online:
+            participant_id = self.user_data.get("participant_id")
+            if participant_id:
+                expressions = []
+                if emo and emo.get("distribution"):
+                    for emotion_name, pct in emo["distribution"].items():
+                        expressions.append({
+                            "level": 0,
+                            "dominant_emotion": emotion_name,
+                            "percentage": pct,
+                        })
+
+                payload = self.server_client.build_session_payload(
+                    participant_id=participant_id,
+                    game_data={
+                        "mode": "normal",
+                        "level_reached": self._current_q,
+                        "total_time": avg,
+                        "cognitive_age": cog,
+                        "visuo_spatial_fit": fit,
+                        "dexterity_score": 0,
+                    },
+                    expressions=expressions,
+                )
+                session_id = self.server_client.submit_game_session(payload)
+                if session_id and emo:
+                    self.server_client.submit_face_logs(session_id, expressions)
+            else:
+                print(">>> [API] Tidak ada participant_id, skip submit")
+        elif self.server_client:
+            print(">>> [API] Server offline, skip submit")
+
 
         end_img = os.path.join(self.base_dir,"assets","images","FILES","TEST_1000x1000","09.jpg")
         if os.path.exists(end_img):

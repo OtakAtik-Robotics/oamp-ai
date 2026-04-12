@@ -22,15 +22,21 @@ This repository contains the intelligent systems that power the robot table. It 
 ```
 ├── main.py                  # Entry point
 ├── src/
-│   ├── ui/game_window.py    # Main UI orchestrator (CustomTkinter)
+│   ├── ui/
+│   │   ├── input_window.py  # Registration form + RFID lookup
+│   │   ├── game_window.py   # Main UI orchestrator (CustomTkinter)
+│   │   └── components.py    # UI components (timer, camera panels, status bar)
 │   ├── vision/
 │   │   ├── blocks.py        # YOLO block detection thread
-│   │   ├── hands.py         # Hand tracking (MediaPipe)
+│   │   ├── hands.py         # Hand tracking (MediaPipe Tasks API)
 │   │   ├── face.py          # Face mesh + emotion detection
 │   │   └── evaluator.py     # Level answer validation
 │   ├── voice/recog.py       # Voice recognition (Wav2Vec2 + Vosk + gTTS)
 │   ├── hardware/serial_io.py # ESP32 serial communication
-│   └── api_client.py        # Backend HTTP client + offline buffer
+│   ├── api_client.py        # Backend HTTP client
+│   └── utils/
+│       ├── audio.py         # Audio playback
+│       └── math_eval.py     # Cognitive age estimation
 ├── models/
 │   ├── weights/             # Model files (.pt, .task)
 │   ├── vosk-model-small-id/ # Vosk offline model
@@ -108,6 +114,9 @@ This repository contains the intelligent systems that power the robot table. It 
 | `YOLO_SKIP_FRAMES` | `2` | YOLO frame skip (higher = faster UI, slower detection) |
 | `MEDIAPIPE_SKIP_FRAMES` | `2` | MediaPipe frame skip |
 | `BUTTON_MODE` | `false` | Hardware button-triggered image display |
+| `ENABLE_FACE_CAMERA` | `true` | Enable/disable face camera (mesh + emotion) |
+| `ENABLE_VOICE` | `true` | Enable/disable voice recognition and TTS |
+| `VOICE_MODEL` | `indonesian-nlp/wav2vec2-large-xlsr-indonesian` | Wav2Vec2 model selection |
 | `DEBUG_MODE` | `false` | Debug mode |
 
 ## Hardware Integration
@@ -117,7 +126,13 @@ This repository contains the intelligent systems that power the robot table. It 
 
 ## Backend API
 
-The system communicates with a Go backend server via REST API. When offline, session data is buffered to local SQLite and synced automatically every 15 seconds. Full API documentation is available in `api-spec.md`.
+The system communicates with a Go backend server via REST API. The app is designed to work independently during development — if the backend is offline, all API calls fail silently and the game runs normally. When the server is available:
+
+1. RFID/UID lookup auto-fills participant data on the registration form
+2. Game session results are submitted after gameplay ends
+3. Face expression logs are sent in the background
+
+Full API documentation is available in `api-spec.md`.
 
 ## Voice Commands
 
@@ -127,3 +142,16 @@ The system communicates with a Go backend server via REST API. When offline, ses
 | skip, lewat, lanjut | skip, next | Skip current level |
 | ulangi, lagi | retry | Retry current level |
 | selesai, berhenti | stop | Stop the game |
+
+Voice detection uses auto-calibration at startup (3-second noise floor measurement) and a cooldown timer to prevent double-triggers.
+
+## Performance Tuning
+
+All AI inference runs in daemon threads to keep the UI responsive. On CPU-only systems (no CUDA), adjust skip frames in `.env`:
+
+| Setting | PC (CPU) | Jetson / Low-end |
+|---------|----------|-------------------|
+| `YOLO_SKIP_FRAMES` | 2-3 | 4-5 |
+| `MEDIAPIPE_SKIP_FRAMES` | 2-3 | 4-5 |
+| `ENABLE_FACE_CAMERA` | true | false (if lag) |
+| `ENABLE_VOICE` | true | false (if lag) |

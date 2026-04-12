@@ -26,7 +26,6 @@ except Exception as e:
     _HAS_MP = False
 
 
-# ── Model path ──────────────────────────────────────────────────────
 _MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "models", "weights")
 _HAND_MODEL = os.path.normpath(os.path.join(_MODEL_DIR, "hand_landmarker.task"))
 
@@ -76,7 +75,7 @@ class HandTracker:
         self._movement_buffer: List[HandMovementSample] = []
         self._last_pos: Optional[Tuple[float,float]] = None
         self._last_ts:  Optional[float] = None
-        self._cached_hands: list = []  # landmark terakhir yang valid
+        self._cached_hands: list = []
 
         if not _HAS_MP or not os.path.isfile(_HAND_MODEL):
             print(f">>> MediaPipe tidak tersedia atau model tidak ditemukan: {_HAND_MODEL}")
