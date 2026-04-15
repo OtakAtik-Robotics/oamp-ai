@@ -71,6 +71,17 @@ class FaceMeshDrawer:
                 output_face_blendshapes=False,
             )
             self._landmarker = FaceLandmarker.create_from_options(options)
+
+            # Cache drawing styles once — avoid repeated get_default_*() calls per frame
+            self._tess_styles  = _mp_drawing_styles.get_default_face_mesh_tesselation_style()
+            self._cont_styles  = _mp_drawing_styles.get_default_face_mesh_contours_style()
+            iris_styles = _mp_drawing_styles.get_default_face_mesh_iris_connections_style()
+            self._iris_styles  = iris_styles if iris_styles else {}
+            self._iris_conns   = (
+                FaceLandmarksConnections.FACE_LANDMARKS_LEFT_IRIS
+                + FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_IRIS
+            )
+
             self.available = True
         except Exception as e:
             print(f">>> [DEBUG] Gagal inisialisasi FaceLandmarker: {e}")
@@ -95,22 +106,22 @@ class FaceMeshDrawer:
             h_img, w_img = frame.shape[:2]
 
             if self._draw_tess:
-                tess_style = _mp_drawing_styles.get_default_face_mesh_tesselation_style()
+                # _tess_styles is a DrawingSpec (single object, not dict)
+                tess = self._tess_styles
                 for conn in FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION:
                     start_lm = face_landmarks[conn.start]
                     end_lm   = face_landmarks[conn.end]
                     cv2.line(frame,
                              (int(start_lm.x * w_img), int(start_lm.y * h_img)),
                              (int(end_lm.x * w_img), int(end_lm.y * h_img)),
-                             tess_style.color, tess_style.thickness, cv2.LINE_AA)
+                             tess.color, tess.thickness, cv2.LINE_AA)
 
             if self._draw_cont:
-                contour_styles = _mp_drawing_styles.get_default_face_mesh_contours_style()
                 for conn in FaceLandmarksConnections.FACE_LANDMARKS_CONTOURS:
                     start_lm = face_landmarks[conn.start]
                     end_lm   = face_landmarks[conn.end]
-                    style = contour_styles.get((conn.start, conn.end),
-                              contour_styles.get((conn.end, conn.start)))
+                    style = self._cont_styles.get((conn.start, conn.end),
+                              self._cont_styles.get((conn.end, conn.start)))
                     if style:
                         cv2.line(frame,
                                  (int(start_lm.x * w_img), int(start_lm.y * h_img)),
@@ -118,16 +129,11 @@ class FaceMeshDrawer:
                                  style.color, style.thickness, cv2.LINE_AA)
 
             if self._draw_iris:
-                iris_styles = _mp_drawing_styles.get_default_face_mesh_iris_connections_style()
-                iris_conns = (
-                    FaceLandmarksConnections.FACE_LANDMARKS_LEFT_IRIS
-                    + FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_IRIS
-                )
-                for conn in iris_conns:
+                for conn in self._iris_conns:
                     start_lm = face_landmarks[conn.start]
                     end_lm   = face_landmarks[conn.end]
-                    style = iris_styles.get((conn.start, conn.end),
-                             iris_styles.get((conn.end, conn.start)))
+                    style = self._iris_styles.get((conn.start, conn.end),
+                             self._iris_styles.get((conn.end, conn.start)))
                     if style:
                         cv2.line(frame,
                                  (int(start_lm.x * w_img), int(start_lm.y * h_img)),

@@ -71,15 +71,17 @@ class ServerClient:
                 f"{self.base_url}{path}",
                 timeout=self.timeout,
             )
-            self._online = True
             r.raise_for_status()
+            self._online = True
             return r.json()
         except requests.Timeout:
+            self._online = False
             logger.error("GET %s timed out", path)
         except requests.ConnectionError:
             self._online = False
             logger.error("Server unreachable: GET %s", path)
         except requests.RequestException as e:
+            self._online = False
             logger.error("GET %s error: %s", path, e)
         return None
 
@@ -90,15 +92,17 @@ class ServerClient:
                 json=data,
                 timeout=self.timeout,
             )
-            self._online = True
             r.raise_for_status()
+            self._online = True
             return r.json()
         except requests.Timeout:
+            self._online = False
             logger.error("POST %s timed out", path)
         except requests.ConnectionError:
             self._online = False
             logger.error("Server unreachable: POST %s", path)
         except requests.RequestException as e:
+            self._online = False
             logger.error("POST %s error: %s", path, e)
         return None
 

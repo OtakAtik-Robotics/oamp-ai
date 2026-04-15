@@ -151,7 +151,7 @@ class Wav2Vec2RecogThread(threading.Thread):
     ):
         super().__init__(daemon=True, name="Wav2Vec2Recog")
         self.on_command    = on_command
-        self.command_queue: queue.Queue[VoiceEvent] = queue.Queue()
+        self.command_queue: queue.Queue[VoiceEvent] = queue.Queue(maxsize=10)
         self.status        = VoiceStatus()
         self.running       = True
         self.is_available  = False
@@ -221,23 +221,31 @@ class Wav2Vec2RecogThread(threading.Thread):
             return ""
 
     def _calibrate(self) -> float:
-        """Rekam 3 detik silence, ukur noise floor, return threshold."""
+        """
+        Rekam 3 detik silence, ukur noise floor, return threshold.
+        Wraps mic recording in try-except; falls back to DEFAULT_THRESHOLD
+        if mic is unavailable, disconnected, or permission denied.
+        """
         import sounddevice as sd
+        DEFAULT_THRESHOLD = 0.030
         print(">>> Kalibrasi mic (diamkan 3 detik)...")
-        samples = []
-        for _ in range(3):
-            audio = sd.rec(
-                int(SAMPLERATE * 1), samplerate=SAMPLERATE,
-                channels=1, dtype="float32",
-            )
-            sd.wait()
-            samples.append(audio)
-        all_audio = np.concatenate(samples)
-        rms_values = [np.sqrt(np.mean(s ** 2)) for s in samples]
-        noise_rms = np.median(rms_values)
-        threshold = max(noise_rms * 3.0, 0.015)
-        print(f">>> Kalibrasi selesai. Noise floor: {noise_rms:.4f}, Threshold: {threshold:.4f}")
-        return threshold
+        try:
+            samples = []
+            for _ in range(3):
+                audio = sd.rec(
+                    int(SAMPLERATE * 1), samplerate=SAMPLERATE,
+                    channels=1, dtype="float32",
+                )
+                sd.wait()
+                samples.append(audio)
+            rms_values = [np.sqrt(np.mean(s ** 2)) for s in samples]
+            noise_rms = np.median(rms_values)
+            threshold = float(max(noise_rms * 3.0, DEFAULT_THRESHOLD))
+            print(f">>> Kalibrasi selesai. Noise floor: {noise_rms:.4f}, Threshold: {threshold:.4f}")
+            return threshold
+        except Exception as e:
+            print(f">>> Kalibrasi mic gagal: {e}. Menggunakan threshold default: {DEFAULT_THRESHOLD}")
+            return DEFAULT_THRESHOLD
 
     def _parse(self, text: str) -> Optional[str]:
         text = text.lower().strip()
@@ -308,8 +316,9 @@ class Wav2Vec2RecogThread(threading.Thread):
 
     def _run_vosk(self):
         def _cb(indata, frames, t, status):
-            try: self._vosk_q.put_nowait(bytes(indata))
-            except queue.Full: pass
+            if self.running:
+                try: self._vosk_q.put_nowait(bytes(indata))
+                except queue.Full: pass
 
         try:
             with sd.RawInputStream(
@@ -318,7 +327,12 @@ class Wav2Vec2RecogThread(threading.Thread):
             ):
                 print(">>> Mic aktif (Vosk fallback mode)...")
                 while self.running:
-                    data = self._vosk_q.get(timeout=1)
+                    try:
+                        data = self._vosk_q.get(timeout=1)
+                    except queue.Empty:
+                        # Normal timeout — no audio data in 1 s, keep waiting
+                        continue
+
                     if self._vosk_recognizer.AcceptWaveform(data):
                         result = json.loads(self._vosk_recognizer.Result())
                         text   = result.get("text", "").strip()
@@ -327,6 +341,7 @@ class Wav2Vec2RecogThread(threading.Thread):
                             if cmd:
                                 self._emit(text, cmd)
         except Exception as e:
+            self.status.update(VoiceStatus.ERROR)
             print(f">>> Vosk thread error: {e}")
 
 
