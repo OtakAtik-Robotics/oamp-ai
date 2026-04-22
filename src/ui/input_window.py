@@ -262,7 +262,7 @@ class InputWindow(customtkinter.CTk):
             gender_val = data.get("gender", "").lower()
             if gender_val in ("male", "female"):
                 self._gender._select(gender_val)
-            print(f"[Input] Auto-fill dari server: {data.get('name')}")
+            print(f"[Input] Auto-fill dari server: {data.get('name') or uid}")
         else:
             self._auth_data = None
             print(f"[Input] UID '{uid}' tidak ditemukan / server offline")

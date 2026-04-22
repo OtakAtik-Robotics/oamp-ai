@@ -1,6 +1,8 @@
 import os
 import time
 import random
+import logging
+from datetime import datetime, timezone
 import numpy as np
 import cv2
 import torch
@@ -9,6 +11,8 @@ from PIL import Image, ImageTk
 from typing import Optional
 
 from src.api_client import ServerClient
+
+logger = logging.getLogger("game_window")
 from src.utils.audio import play_audio, play_feedback_audio
 from src.utils.math_eval import estimate_cognitive_age
 from src.ui.components import (
@@ -372,16 +376,17 @@ class GameWindow(customtkinter.CTk):
         if self._greeter:
             self._greeter.say_finish()
 
-        if self.server_client and self.server_client.is_online:
+        if self.server_client:
             participant_id = self.user_data.get("participant_id")
             if participant_id:
                 expressions = []
                 if emo and emo.get("distribution"):
+                    now_iso = datetime.now(timezone.utc).isoformat()
                     for emotion_name, pct in emo["distribution"].items():
                         expressions.append({
-                            "level": 0,
+                            "level": self._current_q,
                             "dominant_emotion": emotion_name,
-                            "percentage": pct,
+                            "timestamp": now_iso,
                         })
 
                 payload = self.server_client.build_session_payload(
@@ -397,12 +402,11 @@ class GameWindow(customtkinter.CTk):
                     expressions=expressions,
                 )
                 session_id = self.server_client.submit_game_session(payload)
-                if session_id and emo:
-                    self.server_client.submit_face_logs(session_id, expressions)
+                if session_id and expressions:
+                    logger.info("Session %d recorded with %d expressions",
+                                session_id, len(expressions))
             else:
-                print(">>> [API] Tidak ada participant_id, skip submit")
-        elif self.server_client:
-            print(">>> [API] Server offline, skip submit")
+                logger.warning("No participant_id, skip submit")
 
 
         end_img = os.path.join(self.base_dir,"assets","images","FILES","TEST_1000x1000","09.jpg")
@@ -514,6 +518,7 @@ class GameWindow(customtkinter.CTk):
         if getattr(self, "_hand_tracker", None): self._hand_tracker.close()
         if getattr(self, "_face_mesh", None): self._face_mesh.close()
         if self.serial_thread: self.serial_thread.stop()
+        if getattr(self, "server_client", None): self.server_client.stop()
         if torch.cuda.is_available(): torch.cuda.empty_cache()
 
     def destroy(self):
