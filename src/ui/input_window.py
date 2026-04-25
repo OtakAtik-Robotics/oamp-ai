@@ -1,19 +1,19 @@
 import customtkinter
 from typing import Optional
 
-customtkinter.set_appearance_mode("Dark")
-customtkinter.set_default_color_theme("dark-blue")
+customtkinter.set_appearance_mode("Light")
+customtkinter.set_default_color_theme("blue")
 
-RED       = "#D32F2F"
+RED       = "#FF1744"
 RED_DARK  = "#B71C1C"
-RED_LIGHT = "#EF5350"
-BG_DARK   = "#0f0f0f"
-BG_CARD   = "#1a1a1a"
-BG_INPUT  = "#242424"
-BORDER    = "#2e2e2e"
-WHITE     = "#f1f5f9"
-MUTED     = "#94a3b8"
-GREEN     = "#22c55e"
+RED_LIGHT = "#FF5252"
+BG_DARK   = "#f5f5f5"
+BG_CARD   = "#ffffff"
+BG_INPUT  = "#eeeeee"
+BORDER    = "#e0e0e0"
+WHITE     = "#1a1a1a"
+MUTED     = "#757575"
+GREEN     = "#00897B"
 
 
 class StyledEntry(customtkinter.CTkFrame):
@@ -100,7 +100,7 @@ class GenderSelector(customtkinter.CTkFrame):
             height=48,
             corner_radius=8,
             fg_color=BG_INPUT,
-            hover_color="#2a2a2a",
+            hover_color="#e0e0e0",
             border_width=2,
             border_color=BORDER,
             text_color=MUTED,
@@ -114,7 +114,7 @@ class GenderSelector(customtkinter.CTkFrame):
             height=48,
             corner_radius=8,
             fg_color=BG_INPUT,
-            hover_color="#2a2a2a",
+            hover_color="#e0e0e0",
             border_width=2,
             border_color=BORDER,
             text_color=MUTED,
@@ -170,14 +170,14 @@ class InputWindow(customtkinter.CTk):
         customtkinter.CTkLabel(
             header,
             text="OTAK ATIK MERAH PUTIH",
-            font=("Helvetica", 16, "bold"),
+            font=("Courier", 16, "bold"),
             text_color=WHITE,
         ).pack(pady=(12, 2))
 
         customtkinter.CTkLabel(
             header,
             text="Masukkan data peserta untuk memulai",
-            font=("Helvetica", 11),
+            font=("Courier", 11),
             text_color=MUTED,
         ).pack()
 
@@ -194,7 +194,7 @@ class InputWindow(customtkinter.CTk):
         self._uid_btn = customtkinter.CTkButton(
             form, text="Cari", width=80, height=36,
             font=("Helvetica", 12), corner_radius=6,
-            fg_color=BG_INPUT, hover_color="#2a2a2a",
+            fg_color=BG_INPUT, hover_color="#1e1e2e",
             border_width=1, border_color=BORDER, text_color=MUTED,
             command=self._lookup_uid,
         )

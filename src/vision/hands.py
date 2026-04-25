@@ -76,6 +76,8 @@ class HandTracker:
         self._last_pos: Optional[Tuple[float,float]] = None
         self._last_ts:  Optional[float] = None
         self._cached_hands: list = []
+        self._gesture_start_ts: Optional[float] = None
+        self._peace_triggered: bool = False
 
         if not _HAS_MP or not os.path.isfile(_HAND_MODEL):
             print(f">>> MediaPipe tidak tersedia atau model tidak ditemukan: {_HAND_MODEL}")
@@ -200,6 +202,48 @@ class HandTracker:
                                3, (0, 255, 0), -1, cv2.LINE_AA)
 
         return frame
+
+    @staticmethod
+    def _is_peace_sign(landmarks) -> bool:
+        """Check if hand is making a peace sign (index+middle up, ring+pinky down)."""
+        # Index extended: tip 8 above PIP 6 (lower y = higher on screen)
+        if landmarks[8].y >= landmarks[6].y:
+            return False
+        # Middle extended: tip 12 above PIP 10
+        if landmarks[12].y >= landmarks[10].y:
+            return False
+        # Ring curled: tip 16 below PIP 14
+        if landmarks[16].y < landmarks[14].y:
+            return False
+        # Pinky curled: tip 20 below PIP 18
+        if landmarks[20].y < landmarks[18].y:
+            return False
+        return True
+
+    def check_peace_gesture(self) -> bool:
+        """Return True once if peace sign held > 1.5s. Resets after trigger."""
+        if not self._cached_hands:
+            self._gesture_start_ts = None
+            return False
+
+        peace_now = any(self._is_peace_sign(h) for h in self._cached_hands)
+
+        if peace_now:
+            now = time.time()
+            if self._gesture_start_ts is None:
+                self._gesture_start_ts = now
+            elif now - self._gesture_start_ts >= 1.5 and not self._peace_triggered:
+                self._peace_triggered = True
+                return True
+        else:
+            self._gesture_start_ts = None
+            self._peace_triggered = False
+        return False
+
+    def reset_gesture(self):
+        """Reset peace gesture tracking (call on level change)."""
+        self._gesture_start_ts = None
+        self._peace_triggered = False
 
     def reset_session(self, session_start: Optional[float] = None):
         self._session_start = session_start or time.time()

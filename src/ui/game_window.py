@@ -26,11 +26,14 @@ from src.vision.evaluator import BlockEvaluator
 from src.voice.recog import VoiceCommandThread, VoiceGreeter, VoiceStatus
 
 
-RED     = "#D32F2F"
-BG_DARK = "#0f0f0f"
-BG_CARD = "#1a1a1a"
-WHITE   = "#f1f5f9"
-MUTED   = "#64748b"
+RED     = "#FF1744"
+BG_DARK = "#f5f5f5"
+BG_CARD = "#ffffff"
+WHITE   = "#1a1a1a"
+MUTED   = "#757575"
+BORDER  = "#e0e0e0"
+GREEN   = "#00897B"
+CYAN    = "#0097A7"
 
 
 class GameWindow(customtkinter.CTk):
@@ -90,20 +93,22 @@ class GameWindow(customtkinter.CTk):
         self._main.grid_columnconfigure(1, weight=3)
         self._main.grid_rowconfigure(0, weight=1)
 
-        self._left = customtkinter.CTkFrame(self._main, fg_color=BG_CARD, corner_radius=12)
+        self._left = customtkinter.CTkFrame(self._main, fg_color=BG_CARD, corner_radius=12,
+                                             border_width=1, border_color=BORDER)
         self._left.grid(row=0, column=0, sticky="nsew", padx=(12,6), pady=12)
         self._left.grid_columnconfigure(1, weight=1)
         self._left.grid_rowconfigure(1, weight=1)
 
-        self._level_badge = LevelBadge(self._left, width=90)
+        self._level_badge = LevelBadge(self._left, width=100, max_level=self.max_level)
         self._level_badge.grid(row=0, column=0, rowspan=2, padx=(12,8), pady=12, sticky="n")
 
         customtkinter.CTkLabel(
             self._left, text="BLOCK DESIGN",
-            font=("Helvetica",10,"bold"), text_color=MUTED,
+            font=("Courier",10,"bold"), text_color=RED,
         ).grid(row=0, column=1, sticky="w", padx=(0,12), pady=(12,0))
 
-        self._img_frame = customtkinter.CTkFrame(self._left, fg_color="#111", corner_radius=8)
+        self._img_frame = customtkinter.CTkFrame(self._left, fg_color="#e8e8e8", corner_radius=8,
+                                                  border_width=1, border_color=BORDER)
         self._img_frame.grid(row=1, column=1, sticky="nsew", padx=(0,12), pady=(4,12))
         self._img_frame.grid_propagate(False)
 
@@ -113,14 +118,14 @@ class GameWindow(customtkinter.CTk):
         self._img_label = customtkinter.CTkLabel(self._img_frame, text="")
         self._img_label.pack(expand=True, fill="both")
 
-        self._timer = TimerDisplay(self._left, width=90, font_size=22)
+        self._timer = TimerDisplay(self._left, width=100, font_size=22)
         self._timer.grid(row=2, column=0, padx=(12,8), pady=(0,8), sticky="ew")
 
         self._start_btn = customtkinter.CTkButton(
             self._left, text="▶  MULAI",
             font=("Helvetica",14,"bold"), height=44,
             corner_radius=8, fg_color=RED, hover_color="#B71C1C",
-            text_color=WHITE, command=self._on_start,
+            text_color="#ffffff", command=self._on_start,
         )
         self._start_btn.grid(row=2, column=1, padx=(0,12), pady=(0,8), sticky="ew")
 
@@ -134,6 +139,7 @@ class GameWindow(customtkinter.CTk):
         self._status_bar.grid(row=1, column=0, sticky="ew")
 
         self.bind("<Return>", lambda _: self._on_skip())
+        self.bind("<s>", lambda _: self._on_skip())
 
     def _setup_game_state(self):
         self._timer_running = False
@@ -290,10 +296,10 @@ class GameWindow(customtkinter.CTk):
             self._level_btn.grid_remove()
         self._level_btn = customtkinter.CTkButton(
             self._left, text=f"Level {self._current_q}",
-            font=("Helvetica",12,"bold"), height=34,
-            corner_radius=6, fg_color="#1e1e1e",
-            hover_color="#2a2a2a", border_width=1,
-            border_color="#333", text_color=MUTED, state="disabled",
+            font=("Courier",12,"bold"), height=34,
+            corner_radius=6, fg_color=BG_CARD,
+            hover_color="#e0e0e0", border_width=2,
+            border_color=RED, text_color=RED, state="disabled",
         )
         self._level_btn.grid(row=3, column=0, columnspan=2, padx=12, pady=(0,6), sticky="ew")
 
@@ -306,6 +312,7 @@ class GameWindow(customtkinter.CTk):
             self._level_btn.configure(text=f"Level {self._current_q}")
         self._load_image(variant)
         self._hand_tracker.reset_session()
+        self._hand_tracker.reset_gesture()
         self._start_task = time.time()
         self._reset_timer()
         self._start_timer()
@@ -323,7 +330,7 @@ class GameWindow(customtkinter.CTk):
     def _handle_button_mode(self):
         if not self.button_mode: return
         if self._image_visible and time.time()-self._image_show_ts >= self._image_duration:
-            blank = Image.new("RGB",(self.frame_w,self.frame_h),"#111")
+            blank = Image.new("RGB",(self.frame_w,self.frame_h),"#e8e8e8")
             self._img = customtkinter.CTkImage(light_image=blank, size=(self.frame_w,self.frame_h))
             self._img_label.configure(image=self._img)
             self._image_visible = False
@@ -341,6 +348,9 @@ class GameWindow(customtkinter.CTk):
         if self._greeter:
             self._greeter.say_feedback(elapsed)
         self._status_bar.set_attempts(self._evaluator.attempt_count)
+        self._show_score_flash(elapsed)
+        self._shake()
+        self._level_badge.set_completed(self._current_q)
 
         if self._current_q >= self.max_level:
             self._end_game(); return
@@ -357,6 +367,24 @@ class GameWindow(customtkinter.CTk):
     def _on_skip(self):
         if self._timer_running:
             self._complete_level(time.time() - self._start_task)
+
+    def _show_score_flash(self, elapsed: float):
+        flash = customtkinter.CTkFrame(
+            self._left, fg_color=GREEN, corner_radius=8, height=56,
+        )
+        flash.grid(row=1, column=0, columnspan=2, padx=16, pady=16, sticky="ew")
+        flash.grid_propagate(False)
+        customtkinter.CTkLabel(
+            flash, text=f"✓  {elapsed:.1f}s",
+            font=("Courier", 20, "bold"), text_color="#ffffff",
+        ).pack(expand=True)
+        self.after(1200, flash.destroy)
+
+    def _shake(self):
+        self._left.grid_configure(padx=(18, 0))
+        self.after(50, lambda: self._left.grid_configure(padx=(6, 12)))
+        self.after(100, lambda: self._left.grid_configure(padx=(15, 3)))
+        self.after(150, lambda: self._left.grid_configure(padx=(12, 6)))
 
     def _end_game(self):
         self._stop_timer()
@@ -418,8 +446,8 @@ class GameWindow(customtkinter.CTk):
         customtkinter.CTkButton(
             self._left, text="↺  MAIN LAGI",
             font=("Helvetica",13,"bold"), height=44,
-            corner_radius=8, fg_color="#1a3a1a",
-            hover_color="#22c55e", text_color="#22c55e",
+            corner_radius=8, fg_color=RED,
+            hover_color="#B71C1C", text_color="#ffffff",
             command=self.destroy,
         ).grid(row=3, column=0, columnspan=2, padx=12, pady=(0,12), sticky="ew")
 
@@ -449,6 +477,9 @@ class GameWindow(customtkinter.CTk):
 
                     frame_rgb = self._hand_tracker.draw_cached(frame_rgb)
 
+                    if self._hand_tracker.check_peace_gesture():
+                        self.after(0, self._on_skip)
+
                     if self._yolo:
                         if self._frame_count % (self.yolo_skip+1) == 0:
                             self._yolo.submit_frame(frame)
@@ -458,7 +489,7 @@ class GameWindow(customtkinter.CTk):
 
                         for box in self._latest_boxes:
                             x1,y1,x2,y2 = int(box[0]),int(box[1]),int(box[2]),int(box[3])
-                            cv2.rectangle(frame_rgb,(x1,y1),(x2,y2),(255,80,80),2)
+                            cv2.rectangle(frame_rgb,(x1,y1),(x2,y2),(0,0,255),2)
 
                         if len(self._latest_boxes) == 4:
                             boxes = self._latest_boxes
