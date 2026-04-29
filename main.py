@@ -10,6 +10,9 @@ def main():
     load_dotenv()
     server = ServerClient()
 
+    # Start heavy model preloading IN BACKGROUND while input window is active
+    GameWindow._start_preload()  # safe to call before GameWindow exists
+
     user_data = show_input_window(server_client=server)
 
     if user_data:

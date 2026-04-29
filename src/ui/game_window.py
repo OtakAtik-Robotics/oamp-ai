@@ -2,6 +2,7 @@ import os
 import time
 import random
 import logging
+import threading
 from datetime import datetime, timezone
 import numpy as np
 import cv2
@@ -34,6 +35,52 @@ MUTED   = "#757575"
 BORDER  = "#e0e0e0"
 GREEN   = "#00897B"
 CYAN    = "#0097A7"
+
+
+# ─── Heavy-Model Preloader ───────────────────────────────────────────────────
+# Preload all ML models in a background thread while input_window is active.
+# This eliminates the freeze when transitioning to GameWindow.
+_PRELOAD_DONE = False
+_PRELOAD_ERR  = None
+_preload_lock = threading.Lock()
+
+
+def _background_preload():
+    """Run heavy model imports off the main thread."""
+    import os
+    global _PRELOAD_DONE, _PRELOAD_ERR
+    try:
+        # 1. MediaPipe hand model (Eager mode — loads .task file eagerly into memory)
+        from src.vision.hands import HandTracker
+        # 2. MediaPipe face model
+        from src.vision.face import FaceMeshDrawer, FaceEmotionThread
+        # 3. YOLO weights (torch loads CUDA kernels, then we load best.pt)
+        base_dir = os.path.join(os.path.dirname(__file__), "..", "..")
+        device   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        use_bantal = os.getenv("MODEL_BANTAL", "false").lower() == "true"
+        if use_bantal:
+            p = os.path.join(base_dir, "models", "weights", "bantal.pt")
+            from ultralytics import YOLO
+            YOLO(p).to(device)
+        else:
+            p = os.path.join(base_dir, "models", "weights", "best.pt")
+            torch.hub.load(
+                os.path.join(base_dir, "models", "yolov5"),
+                "custom", path=p, force_reload=True, source="local",
+            ).to(device)
+    except Exception as e:
+        _PRELOAD_ERR = e
+    finally:
+        with _preload_lock:
+            _PRELOAD_DONE = True
+
+
+def _start_preload():
+    """Kick off background preload if not already running."""
+    with _preload_lock:
+        if not _PRELOAD_DONE and '_PRELOAD_THREAD' not in globals():
+            t = threading.Thread(target=_background_preload, daemon=True, name="ModelPreload")
+            t.start()
 
 
 class GameWindow(customtkinter.CTk):
@@ -162,20 +209,41 @@ class GameWindow(customtkinter.CTk):
         self._evaluator     = BlockEvaluator()
         self._cur_emotion   = "neutral"
 
+    @staticmethod
+    def _cam_probe(cap, label, idx):
+        """Validate camera can actually read a frame (V4L2 isOpened quirk)."""
+        if not cap.isOpened():
+            print(f">>> {label} (index {idx}) tidak tersedia.")
+            cap.release()
+            return False
+        ret, _ = cap.read()
+        if not ret:
+            print(f">>> {label} (index {idx}) terbuka tapi gagal baca frame.")
+            cap.release()
+            return False
+        return True
+
     def _setup_ai(self):
         # Game camera
         self._cap_game = cv2.VideoCapture(self.cam_game_idx)
         self._cap_game.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         self._cap_game.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self._game_cam_ok = self._cam_probe(
+            self._cap_game, "Kamera game", self.cam_game_idx
+        )
+        if not self._game_cam_ok:
+            self._cap_game = None
 
         # Face camera
         if self.enable_face:
             self._cap_face = cv2.VideoCapture(self.cam_face_idx)
             self._cap_face.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
             self._cap_face.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            self._face_cam_ok = self._cap_face.isOpened()
+            self._face_cam_ok = self._cam_probe(
+                self._cap_face, "Kamera wajah", self.cam_face_idx
+            )
             if not self._face_cam_ok:
-                print(f">>> Kamera wajah (index {self.cam_face_idx}) tidak tersedia.")
+                self._cap_face = None
         else:
             self._cap_face = None
             self._face_cam_ok = False
@@ -467,7 +535,7 @@ class GameWindow(customtkinter.CTk):
         self._handle_button_mode()
 
         try:
-            if self._cap_game.isOpened():
+            if self._game_cam_ok and self._cap_game and self._cap_game.isOpened():
                 ret, frame = self._cap_game.read()
                 if ret:
                     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
