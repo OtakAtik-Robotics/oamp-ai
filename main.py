@@ -2,7 +2,7 @@ import os
 import platform
 from dotenv import load_dotenv
 from src.ui.input_window import show_input_window
-from src.ui.game_window import GameWindow
+from src.ui.game_window import GameWindow, _start_preload
 from src.hardware.serial_io import SerialReaderThread
 from src.api_client import ServerClient
 
@@ -11,7 +11,7 @@ def main():
     server = ServerClient()
 
     # Start heavy model preloading IN BACKGROUND while input window is active
-    GameWindow._start_preload()  # safe to call before GameWindow exists
+    _start_preload()  # background preload while input_window is active
 
     user_data = show_input_window(server_client=server)
 

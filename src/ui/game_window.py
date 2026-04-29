@@ -78,7 +78,7 @@ def _background_preload():
 def _start_preload():
     """Kick off background preload if not already running."""
     with _preload_lock:
-        if not _PRELOAD_DONE and '_PRELOAD_THREAD' not in globals():
+        if not _PRELOAD_DONE:
             t = threading.Thread(target=_background_preload, daemon=True, name="ModelPreload")
             t.start()
 
